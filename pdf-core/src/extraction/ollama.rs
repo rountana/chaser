@@ -688,7 +688,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires local Ollama with qwen3.5:9b pulled"]
+    #[ignore = "requires local Ollama with qwen3.5:9b pulled — run: PDF_LAB_DEBUG=1 cargo test -p pdf-core -- live_agentic_loop --include-ignored --nocapture"]
     async fn live_agentic_loop_text_only_doc() {
         // Uses a text-only page — no Tesseract required, no image upload.
         // Verifies the loop terminates and submit_extraction is called.
@@ -707,7 +707,9 @@ mod tests {
 
         let extraction = result.unwrap();
         assert_eq!(extraction.pages.len(), 1);
-        assert!(!extraction.ocr_method.is_empty());
-        assert_eq!(extraction.doc_type, doc_type);
+        assert_eq!(extraction.pages[0].page_num, 1, "model should return page 1");
+        assert!(!extraction.pages[0].text.is_empty(), "model should extract page text");
+        assert_eq!(extraction.ocr_method, "text-embedded", "text-only docs should use text-embedded path");
+        assert!(!extraction.fields.is_empty(), "model should have extracted at least one structured field");
     }
 }
