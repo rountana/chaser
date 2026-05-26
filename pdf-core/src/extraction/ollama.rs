@@ -16,7 +16,7 @@
 //!   the iteration cap is hit.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -38,7 +38,6 @@ macro_rules! debug {
     ($($arg:tt)*) => { if debug_enabled() { eprintln!($($arg)*); } }
 }
 
-#[allow(dead_code)]
 const OLLAMA_SYSTEM_PROMPT: &str = "\
 You are a document extraction assistant with access to a local OCR tool.
 
@@ -74,7 +73,6 @@ Confidence thresholds: HIGH = 85.0, MEDIUM = 60.0";
 ///
 /// `submit_extraction`'s schema is generated dynamically from the `SchemaRegistry`
 /// for the detected `doc_type`, so the model only sees fields relevant to that class.
-#[allow(dead_code)]
 fn build_ollama_tools(schema: &SchemaRegistry, doc_type: &str) -> Value {
     let effective_fields = schema.effective_fields(doc_type);
 
@@ -148,9 +146,8 @@ fn build_ollama_tools(schema: &SchemaRegistry, doc_type: &str) -> Value {
 /// - Image pages: text label block + `{type:"image_url", image_url:{url:"data:{media_type};base64,{b64}"}}` block.
 ///
 /// This mirrors `claude.rs::build_content_blocks()` but uses Ollama's image format.
-#[allow(dead_code)]
 fn build_ollama_content_blocks(pages: &[PageContent]) -> Vec<Value> {
-    // Output is for the OpenAI-compat /v1/chat/completions endpoint — do NOT pass to vision_call(), which uses the native /api/chat format.
+    // Output is for the OpenAI-compat /api/chat endpoint (Ollama format).
     let mut blocks = Vec::new();
     for page in pages {
         match page {
@@ -184,14 +181,12 @@ fn build_ollama_content_blocks(pages: &[PageContent]) -> Vec<Value> {
 // Tool call parsing
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 struct OllamaToolCall {
     id: String,
     name: String,
     arguments: Value,
 }
 
-#[allow(dead_code)]
 fn parse_ollama_tool_calls(response: &Value) -> Vec<OllamaToolCall> {
     let tool_calls = match response["message"]["tool_calls"].as_array() {
         Some(arr) => arr,
@@ -216,7 +211,6 @@ fn parse_ollama_tool_calls(response: &Value) -> Vec<OllamaToolCall> {
     }).collect()
 }
 
-#[allow(dead_code)]
 fn parse_extraction_input(
     input: &Value,
     doc_type: &str,
@@ -318,23 +312,17 @@ async fn text_call(client: &Client, base_url: &str, model: &str, prompt: &str) -
 // Pass 2 — Full extraction
 // ---------------------------------------------------------------------------
 
-/// Run the sequential extraction pipeline against a local Ollama instance.
+/// Run the agentic tool-calling extraction loop against a local Ollama instance.
 ///
-/// Unlike the Claude backend, this function does NOT use an agentic tool-call loop.
-/// Instead it orchestrates OCR and vision calls itself:
-///
-/// 1. **Per-page OCR routing**: For each image page, Tesseract runs first.
-///    Based on the confidence score the page takes one of three paths:
-///    - HIGH (≥85): Use Tesseract text verbatim — no Ollama call needed.
-///    - MEDIUM (60–85): Ask Ollama to correct OCR errors using the image.
-///    - LOW (<60): Discard Tesseract text; ask Ollama to read the image from scratch.
-///
-/// 2. **Metadata extraction**: After all pages are processed, the first image is
-///    sent to Ollama with a JSON-format prompt to extract structured fields.
-///    This is a separate call, not integrated into the page-text loop.
+/// All pages (text labels + base64 images) are sent in a single user message
+/// alongside two tool definitions (`ocr_scan`, `submit_extraction`). The model
+/// orchestrates its own OCR strategy — calling `ocr_scan` for each image page
+/// and routing based on confidence — then submits the structured result via
+/// `submit_extraction`. The Rust loop runs until `submit_extraction` is received
+/// or the iteration cap is hit.
 ///
 /// The `log` callback receives human-readable progress messages suitable for
-/// displaying in a terminal UI (page-level timing, pass/fail status).
+/// displaying in a terminal UI.
 pub async fn call_ollama(
     pages: &[PageContent],
     config: &ClaudeConfig,
@@ -342,167 +330,151 @@ pub async fn call_ollama(
     doc_type: &str,
     log: &dyn Fn(&str),
 ) -> anyhow::Result<ExtractionResult> {
-    // Connectivity is only required when there are image pages that need vision.
-    // Text-only documents can be handled without Ollama running at all.
     let has_images = pages.iter().any(|p| p.is_image());
     if has_images {
         test_connection(config).await.context("Ollama is not available")?;
     }
 
-    // Use a per-call timeout; Ollama can be slow on large images or cold starts.
+    // 120s per turn: vision + thinking can be slow on local hardware.
     let client = Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(120))
         .build()?;
     let base_url = config.ollama_base();
     let model = config.resolved_ollama_model();
 
     debug!("[ollama] base_url={base_url} model={model} pages={}", pages.len());
 
-    let mut page_texts: Vec<PageText> = Vec::new();
-    // Track the routing label for each page so we can compute the aggregate method label.
-    let mut path_labels: Vec<&str> = Vec::new();
-    // We only keep the first image for the metadata extraction step because sending
-    // every image would be expensive and the first page usually has the key fields.
-    let mut first_image_b64: Option<String> = None;
-
-    for page in pages {
-        match page {
-            // Embedded text pages need no OCR — pass the text through directly.
-            PageContent::Text { page_num, text } => {
-                debug!("[ollama] page={page_num} path=text-embedded chars={}", text.len());
-                page_texts.push(PageText { page_num: *page_num, text: text.clone() });
-                path_labels.push("text-embedded");
+    let image_map: HashMap<u32, Vec<u8>> = pages.iter()
+        .filter_map(|p| {
+            if let PageContent::Image { page_num, data, .. } = p {
+                Some((*page_num, data.clone()))
+            } else {
+                None
             }
-            PageContent::Image { page_num, data, .. } => {
-                debug!("[ollama] page={page_num} image bytes={}", data.len());
-                let b64 = BASE64.encode(data);
-                // Capture the first image for the later metadata extraction call.
-                if first_image_b64.is_none() {
-                    first_image_b64 = Some(b64.clone());
+        })
+        .collect();
+
+    let image_page_count = image_map.len();
+    let max_iters = std::cmp::max(5, image_page_count * 2 + 2);
+
+    let content_blocks = build_ollama_content_blocks(pages);
+    let tools = build_ollama_tools(schema, doc_type);
+
+    let mut messages: Vec<Value> = vec![
+        json!({"role": "system", "content": OLLAMA_SYSTEM_PROMPT}),
+        json!({"role": "user", "content": content_blocks}),
+    ];
+
+    let mut confidence_map: HashMap<u32, f32> = HashMap::new();
+    let mut extraction_result: Option<ExtractionResult> = None;
+
+    for iter in 0..max_iters {
+        let body = json!({
+            "model": model,
+            "stream": false,
+            "messages": messages,
+            "tools": tools
+        });
+
+        let response = client
+            .post(format!("{base_url}/api/chat"))
+            .json(&body)
+            .send()
+            .await
+            .context("sending request to Ollama")?;
+
+        let status = response.status();
+        let response_text = response.text().await.context("reading Ollama response")?;
+        if !status.is_success() {
+            anyhow::bail!("Ollama error {status}: {response_text}");
+        }
+
+        let response_json: Value = serde_json::from_str(&response_text)
+            .context("parsing Ollama response JSON")?;
+
+        // Append the assistant's turn (including any tool_calls) to maintain context.
+        let assistant_message = response_json["message"].clone();
+        messages.push(assistant_message);
+
+        let tool_calls = parse_ollama_tool_calls(&response_json);
+
+        if tool_calls.is_empty() {
+            // Model stopped without calling any tool.
+            if extraction_result.is_none() {
+                anyhow::bail!(
+                    "Ollama stopped without calling submit_extraction after {} iteration(s)",
+                    iter + 1
+                );
+            }
+            break;
+        }
+
+        let mut found_submit = false;
+
+        for tool_call in &tool_calls {
+            let result_content = match tool_call.name.as_str() {
+                "ocr_scan" => {
+                    let page_num = tool_call.arguments["page_num"].as_u64().unwrap_or(0) as u32;
+                    log(&format!("    page {page_num}: OCR..."));
+                    match image_map.get(&page_num) {
+                        Some(bytes) => {
+                            match ocr::scan_page(bytes.clone()).await {
+                                Ok(ocr_result) => {
+                                    confidence_map.insert(page_num, ocr_result.mean_confidence);
+                                    debug!("[ollama] page={page_num} conf={:.1}", ocr_result.mean_confidence);
+                                    serde_json::to_string(&ocr_result).unwrap_or_default()
+                                }
+                                Err(e) => json!({"error": e.to_string()}).to_string(),
+                            }
+                        }
+                        None => json!({
+                            "error": format!("page {} is not a scanned image page", page_num)
+                        }).to_string(),
+                    }
                 }
-
-                // Step 1: run local Tesseract OCR and record the result.
-                log(&format!("    page {page_num}: OCR..."));
-                let t = Instant::now();
-                let ocr_result = ocr::scan_page(data.clone()).await?;
-                let conf = ocr_result.mean_confidence;
-                log(&format!("    page {page_num}: OCR done ({:.1}s, conf={:.0})", t.elapsed().as_secs_f32(), conf));
-                debug!("[ollama] page={page_num} tesseract confidence={conf:.1} text_len={}", ocr_result.text.len());
-
-                // Step 2: choose a strategy based on the Tesseract confidence score.
-                let (text, label) = if conf >= ocr::HIGH_CONFIDENCE {
-                    // Tesseract is reliable — use it directly, no Ollama call needed.
-                    debug!("[ollama] page={page_num} path=tesseract-only");
-                    (ocr_result.text, "tesseract-only")
-                } else if conf >= ocr::MEDIUM_CONFIDENCE {
-                    // Tesseract has recognisable errors — ask Ollama to correct them
-                    // using the original image as a reference.
-                    debug!("[ollama] page={page_num} path=tesseract-ollama-cleanup");
-                    let prompt = format!(
-                        "Correct OCR errors in the text below using the document image as reference. \
-                        Return only the corrected text, no commentary.\n\nOCR text:\n{}",
-                        ocr_result.text
-                    );
-                    log(&format!("    page {page_num}: Ollama cleanup..."));
-                    let t = Instant::now();
-                    match vision_call(&client, base_url, model, &prompt, &b64).await {
-                        Ok(corrected) => {
-                            log(&format!("    page {page_num}: Ollama cleanup done ({:.1}s)", t.elapsed().as_secs_f32()));
-                            debug!("[ollama] page={page_num} cleanup response len={}", corrected.len());
-                            (corrected, "tesseract-ollama-cleanup")
-                        }
-                        Err(e) => {
-                            // On vision failure, fall back to raw Tesseract text rather than
-                            // returning an error — a partial result is better than nothing.
-                            log(&format!("    page {page_num}: Ollama cleanup FAILED ({:.1}s): {e:#}", t.elapsed().as_secs_f32()));
-                            debug!("[ollama] page={page_num} cleanup vision_call FAILED: {e:#}");
-                            (ocr_result.text, "tesseract-ollama-cleanup")
-                        }
+                "submit_extraction" => {
+                    match parse_extraction_input(&tool_call.arguments, doc_type, schema) {
+                        Ok(result) => extraction_result = Some(result),
+                        Err(e) => return Err(e),
                     }
-                } else {
-                    // Tesseract confidence is too low to be useful — let Ollama read
-                    // the image directly with its vision capability.
-                    debug!("[ollama] page={page_num} path=ollama-vision (tesseract too low)");
-                    let prompt = "Extract all visible text from this document image exactly as it appears. \
-                                  Return only the raw text, no commentary.";
-                    log(&format!("    page {page_num}: Ollama vision..."));
-                    let t = Instant::now();
-                    match vision_call(&client, base_url, model, prompt, &b64).await {
-                        Ok(extracted) => {
-                            log(&format!("    page {page_num}: Ollama vision done ({:.1}s)", t.elapsed().as_secs_f32()));
-                            let preview: String = extracted.chars().take(120).collect();
-                            debug!("[ollama] page={page_num} vision response len={} preview={:?}",
-                                extracted.len(), preview);
-                            (extracted, "ollama-vision")
-                        }
-                        Err(e) => {
-                            // Return an empty string rather than propagating the error so
-                            // the rest of the document still produces output.
-                            log(&format!("    page {page_num}: Ollama vision FAILED ({:.1}s): {e:#}", t.elapsed().as_secs_f32()));
-                            debug!("[ollama] page={page_num} vision vision_call FAILED: {e:#}");
-                            (String::new(), "ollama-vision")
-                        }
-                    }
-                };
+                    found_submit = true;
+                    "{\"status\":\"accepted\"}".to_string()
+                }
+                other => {
+                    format!("{{\"error\":\"unknown tool: {}\"}}", other)
+                }
+            };
 
-                page_texts.push(PageText { page_num: *page_num, text });
-                path_labels.push(label);
-            }
+            // Each tool result is a separate message in Ollama's OpenAI-compat format.
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": result_content
+            }));
+        }
+
+        if found_submit {
+            break;
         }
     }
 
-    let effective_fields = schema.effective_fields(doc_type);
+    let mut result = extraction_result
+        .context("max iterations reached without a submit_extraction call")?;
 
-    // Metadata extraction: send the first image to Ollama with a structured JSON prompt.
-    // This is a separate call from the page-text loop — it focuses Claude purely on
-    // extracting named fields rather than transcribing raw text.
-    // Documents without any image pages skip this step entirely.
-    let fields = match &first_image_b64 {
-        Some(b64) => {
-            debug!("[ollama] calling vision for metadata extraction");
-            // Build one prompt line per field using the schema's human-readable descriptions.
-            let field_descriptions = effective_fields.iter()
-                .map(|f| schema.field_prompt_line(f))
-                .collect::<Vec<_>>()
-                .join("\n");
-            // Ask Ollama to respond with raw JSON (no markdown fences) so we can parse
-            // it directly without stripping code block delimiters.
-            let prompt = format!(
-                "Extract these fields from this document image.\n\
-                 Field descriptions:\n{field_descriptions}\n\n\
-                 Respond with valid JSON only, no markdown fences, no explanation:\n{{\n{}\n}}",
-                effective_fields.iter()
-                    .map(|f| format!("  \"{}\": \"...\"", f.name))
-                    .collect::<Vec<_>>()
-                    .join(",\n")
-            );
-            log("    metadata: Ollama vision...");
-            let t = Instant::now();
-            match vision_call(&client, base_url, model, &prompt, b64).await {
-                Ok(raw) => {
-                    log(&format!("    metadata: Ollama vision done ({:.1}s)", t.elapsed().as_secs_f32()));
-                    debug!("[ollama] metadata raw response: {raw:?}");
-                    parse_fields(&raw, &effective_fields, schema)
-                }
-                Err(e) => {
-                    // Metadata extraction failure is non-fatal — return an empty fields
-                    // map and let page texts stand as the extraction output.
-                    log(&format!("    metadata: Ollama vision FAILED ({:.1}s): {e:#}", t.elapsed().as_secs_f32()));
-                    debug!("[ollama] metadata vision_call FAILED: {e:#}");
-                    HashMap::new()
+    let paths: Vec<ocr::OcrPath> = pages.iter().map(|p| {
+        match p {
+            PageContent::Text { .. } => ocr::OcrPath::SkippedTextPage,
+            PageContent::Image { page_num, .. } => {
+                match confidence_map.get(page_num) {
+                    Some(&conf) => ocr::OcrPath::from_confidence(conf),
+                    None => ocr::OcrPath::LlmVision, // model used vision without calling ocr_scan
                 }
             }
         }
-        // Text-only document — no image to extract metadata from.
-        None => HashMap::new(),
-    };
+    }).collect();
 
-    Ok(ExtractionResult {
-        pages: page_texts,
-        doc_type: doc_type.to_string(),
-        fields,
-        ocr_method: aggregate_method(&path_labels),
-    })
+    result.ocr_method = ocr::aggregate_ocr_method(&paths);
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -549,130 +521,6 @@ pub async fn test_connection(config: &ClaudeConfig) -> anyhow::Result<std::time:
     Ok(start.elapsed())
 }
 
-// ---------------------------------------------------------------------------
-// Vision HTTP helper
-// ---------------------------------------------------------------------------
-
-/// Send a prompt and a single base64-encoded image to Ollama's `/api/chat` endpoint.
-///
-/// Ollama's multimodal chat format attaches images as a list of base64 strings
-/// on the message object alongside the text content field.
-///
-/// Returns the model's response text, trimmed of surrounding whitespace.
-async fn vision_call(client: &Client, base_url: &str, model: &str, prompt: &str, image_b64: &str) -> anyhow::Result<String> {
-    let url = format!("{base_url}/api/chat");
-    debug!("[vision_call] POST {url} model={model} image_b64_len={}", image_b64.len());
-
-    let body = json!({
-        "model": model,
-        "stream": false,
-        "messages": [{
-            "role": "user",
-            "content": prompt,
-            // Ollama's vision API accepts a list of base64 image strings here.
-            "images": [image_b64]
-        }]
-    });
-
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .context("calling Ollama /api/chat")?;
-
-    let status = resp.status();
-    debug!("[vision_call] HTTP status={status}");
-
-    if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        debug!("[vision_call] error body: {text}");
-        anyhow::bail!("Ollama error {status}: {text}");
-    }
-
-    let val: Value = resp.json().await.context("parsing Ollama response")?;
-    debug!("[vision_call] response keys: {}", val.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default());
-
-    val["message"]["content"]
-        .as_str()
-        .map(|s| s.trim().to_string())
-        .ok_or_else(|| anyhow::anyhow!("unexpected Ollama response shape: {val}"))
-}
-
-// ---------------------------------------------------------------------------
-// Response parsing
-// ---------------------------------------------------------------------------
-
-/// Parse the raw JSON string returned by Ollama's metadata extraction call into a
-/// normalised field map.
-///
-/// The model sometimes wraps the JSON in markdown fences or adds leading text —
-/// the `start`/`end` slice extraction handles those cases by finding the outermost
-/// `{` … `}` regardless of surrounding content.
-fn parse_fields(
-    response: &str,
-    fields: &[&crate::schema::FieldDef],
-    schema: &SchemaRegistry,
-) -> HashMap<String, String> {
-    // Find the JSON object boundaries in case the model added prose around it.
-    let start = response.find('{').unwrap_or(0);
-    let end = response.rfind('}').map(|i| i + 1).unwrap_or(response.len());
-    let slice = &response[start..end];
-
-    let mut result = HashMap::new();
-    if let Ok(val) = serde_json::from_str::<Value>(slice) {
-        for field in fields {
-            let raw = val[&field.name].as_str().unwrap_or("");
-            let normalised = schema.normalise(field, raw);
-            // Same inclusion rule as the Claude backend: required fields are always
-            // present in the map, optional fields are omitted when empty.
-            if !normalised.is_empty() || field.required {
-                result.insert(field.name.clone(), normalised);
-            }
-        }
-    }
-    result
-}
-
-// ---------------------------------------------------------------------------
-// OCR method aggregation
-// ---------------------------------------------------------------------------
-
-/// Reduce a list of per-page routing labels to a single summary `ocr_method` string.
-///
-/// Rules:
-/// - All pages used embedded text → `"text-embedded"`.
-/// - All image pages used the same path → that path name.
-/// - Image pages took different paths → `"mixed:{dominant}"` where `dominant` is
-///   the highest-ranked path by the severity scale below.
-///
-/// Severity scale (higher = more heavyweight processing):
-///   text-embedded < tesseract-only < tesseract-ollama-cleanup < ollama-vision
-fn aggregate_method(labels: &[&str]) -> String {
-    let rank = |l: &str| match l {
-        "text-embedded" => 0u8,
-        "tesseract-only" => 1,
-        "tesseract-ollama-cleanup" => 2,
-        "ollama-vision" => 3,
-        _ => 0,
-    };
-
-    // Exclude text-embedded pages from the image-path analysis.
-    let image_labels: Vec<&str> = labels.iter().copied().filter(|l| *l != "text-embedded").collect();
-
-    if image_labels.is_empty() {
-        return "text-embedded".to_string();
-    }
-
-    let dominant = image_labels.iter().copied().max_by_key(|l| rank(l)).unwrap();
-    let all_same = image_labels.iter().all(|l| rank(l) == rank(dominant));
-
-    if all_same {
-        dominant.to_string()
-    } else {
-        format!("mixed:{dominant}")
-    }
-}
 
 #[cfg(test)]
 mod tests {
