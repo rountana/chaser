@@ -526,7 +526,7 @@ pub async fn test_connection(config: &ClaudeConfig) -> anyhow::Result<std::time:
 
 #[cfg(test)]
 mod tests {
-    use super::{build_ollama_tools, build_ollama_content_blocks, parse_ollama_tool_calls, parse_extraction_input};
+    use super::{build_ollama_tools, build_ollama_content_blocks, parse_ollama_tool_calls, parse_extraction_input, call_ollama};
     use crate::schema::SchemaRegistry;
     use super::PageContent;
     use serde_json::json;
@@ -685,5 +685,29 @@ mod tests {
         let err = parse_extraction_input(&input, &schema.doc_type_default, &schema);
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("missing pages array"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local Ollama with qwen3.5:9b pulled"]
+    async fn live_agentic_loop_text_only_doc() {
+        // Uses a text-only page — no Tesseract required, no image upload.
+        // Verifies the loop terminates and submit_extraction is called.
+        let config = crate::config::ClaudeConfig::default();
+        let schema = SchemaRegistry::default_schema();
+        let doc_type = schema.doc_type_default.clone();
+
+        let pages = vec![PageContent::Text {
+            page_num: 1,
+            text: "Name: Arjun Sharma\nDate: 12/05/2023\nAmount: INR 5,000".to_string(),
+        }];
+
+        let log = |msg: &str| eprintln!("{msg}");
+        let result = call_ollama(&pages, &config, &schema, &doc_type, &log).await;
+        assert!(result.is_ok(), "call_ollama failed: {:?}", result.err());
+
+        let extraction = result.unwrap();
+        assert_eq!(extraction.pages.len(), 1);
+        assert!(!extraction.ocr_method.is_empty());
+        assert_eq!(extraction.doc_type, doc_type);
     }
 }
