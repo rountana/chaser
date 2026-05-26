@@ -200,9 +200,18 @@ fn parse_ollama_tool_calls(response: &Value) -> Vec<OllamaToolCall> {
     tool_calls.iter().filter_map(|call| {
         let id = call["id"].as_str().unwrap_or("").to_string();
         let name = call["function"]["name"].as_str().unwrap_or("").to_string();
-        // Ollama returns arguments as a JSON string, not a parsed object.
-        let args_str = call["function"]["arguments"].as_str().unwrap_or("{}");
-        let arguments = serde_json::from_str(args_str).unwrap_or(json!({}));
+        // Ollama may return arguments as a JSON string (OpenAI-compat) or a JSON object
+        // (native /api/chat). Handle both to avoid silently losing tool arguments.
+        let arguments = match &call["function"]["arguments"] {
+            Value::String(s) => {
+                serde_json::from_str(s).unwrap_or_else(|_| {
+                    debug!("[ollama] tool call '{}': failed to parse arguments JSON string", name);
+                    json!({})
+                })
+            }
+            obj @ Value::Object(_) => obj.clone(),
+            _ => json!({}),
+        };
         if name.is_empty() { None } else { Some(OllamaToolCall { id, name, arguments }) }
     }).collect()
 }
@@ -739,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_tool_calls_parses_arguments_from_string() {
+    fn parse_tool_calls_parses_string_arguments() {
         let response = json!({
             "message": {
                 "role": "assistant",
@@ -756,9 +765,52 @@ mod tests {
         });
         let calls = parse_ollama_tool_calls(&response);
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].name, "ocr_scan");
         assert_eq!(calls[0].arguments["page_num"], 3);
+    }
+
+    #[test]
+    fn parse_tool_calls_parses_object_arguments() {
+        let response = json!({
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {
+                        "name": "ocr_scan",
+                        "arguments": {"page_num": 5}
+                    }
+                }]
+            }
+        });
+        let calls = parse_ollama_tool_calls(&response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "ocr_scan");
+        assert_eq!(calls[0].arguments["page_num"], 5);
+    }
+
+    #[test]
+    fn parse_tool_calls_skips_empty_name() {
+        let response = json!({
+            "message": {
+                "tool_calls": [
+                    {"id": "x", "function": {"name": "", "arguments": "{}"}},
+                    {"id": "y", "function": {"name": "ocr_scan", "arguments": "{\"page_num\": 1}"}}
+                ]
+            }
+        });
+        let calls = parse_ollama_tool_calls(&response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "ocr_scan");
+    }
+
+    #[test]
+    fn parse_tool_calls_returns_empty_for_empty_array() {
+        let response = json!({"message": {"role": "assistant", "content": "hi", "tool_calls": []}});
+        let calls = parse_ollama_tool_calls(&response);
+        assert!(calls.is_empty());
     }
 
     #[test]
