@@ -140,6 +140,45 @@ fn build_ollama_tools(schema: &SchemaRegistry, doc_type: &str) -> Value {
     ])
 }
 
+/// Build content blocks for the agentic extraction loop in Ollama's content format.
+///
+/// Converts a list of pages (text + images) into a format suitable for sending to
+/// Ollama's chat API alongside tool definitions. Each page becomes one or more blocks:
+/// - Text pages: single `{type:"text", text:"[Page N — embedded text]\n{text}"}` block.
+/// - Image pages: text label block + `{type:"image_url", image_url:{url:"data:{media_type};base64,{b64}"}}` block.
+///
+/// This mirrors `claude.rs::build_content_blocks()` but uses Ollama's image format.
+#[allow(dead_code)]
+fn build_ollama_content_blocks(pages: &[PageContent]) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    for page in pages {
+        match page {
+            PageContent::Text { page_num, text } => {
+                blocks.push(json!({
+                    "type": "text",
+                    "text": format!("[Page {page_num} — embedded text]\n{text}")
+                }));
+            }
+            PageContent::Image { page_num, data, media_type } => {
+                blocks.push(json!({
+                    "type": "text",
+                    "text": format!(
+                        "[Page {page_num} — scanned image; call ocr_scan(page_num={page_num}) first]"
+                    )
+                }));
+                let b64 = BASE64.encode(data);
+                blocks.push(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{media_type};base64,{b64}")
+                    }
+                }));
+            }
+        }
+    }
+    blocks
+}
+
 // ---------------------------------------------------------------------------
 // Pass 1 — Type detection
 // ---------------------------------------------------------------------------
@@ -566,8 +605,9 @@ fn aggregate_method(labels: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::build_ollama_tools;
+    use super::{build_ollama_tools, build_ollama_content_blocks};
     use crate::schema::SchemaRegistry;
+    use super::PageContent;
 
     #[test]
     fn build_tools_has_openai_wrapper() {
@@ -596,5 +636,35 @@ mod tests {
         assert!(submit["function"]["parameters"]["required"]
             .as_array().unwrap()
             .iter().any(|v| v == "pages"));
+    }
+
+    #[test]
+    fn content_blocks_text_page() {
+        let pages = vec![PageContent::Text {
+            page_num: 1,
+            text: "hello world".to_string(),
+        }];
+        let blocks = build_ollama_content_blocks(&pages);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+        assert!(blocks[0]["text"].as_str().unwrap().contains("[Page 1 — embedded text]"));
+        assert!(blocks[0]["text"].as_str().unwrap().contains("hello world"));
+    }
+
+    #[test]
+    fn content_blocks_image_page() {
+        let pages = vec![PageContent::Image {
+            page_num: 2,
+            data: vec![0xFF, 0xD8, 0xFF], // minimal JPEG magic bytes
+            media_type: "image/jpeg".to_string(),
+        }];
+        let blocks = build_ollama_content_blocks(&pages);
+        // Text label + image_url block
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "text");
+        assert!(blocks[0]["text"].as_str().unwrap().contains("ocr_scan(page_num=2)"));
+        assert_eq!(blocks[1]["type"], "image_url");
+        let url = blocks[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/jpeg;base64,"));
     }
 }
