@@ -150,6 +150,7 @@ fn build_ollama_tools(schema: &SchemaRegistry, doc_type: &str) -> Value {
 /// This mirrors `claude.rs::build_content_blocks()` but uses Ollama's image format.
 #[allow(dead_code)]
 fn build_ollama_content_blocks(pages: &[PageContent]) -> Vec<Value> {
+    // Output is for the OpenAI-compat /v1/chat/completions endpoint — do NOT pass to vision_call(), which uses the native /api/chat format.
     let mut blocks = Vec::new();
     for page in pages {
         match page {
