@@ -402,7 +402,7 @@ pub async fn call_ollama(
             // Model stopped without calling any tool.
             if extraction_result.is_none() {
                 anyhow::bail!(
-                    "Ollama stopped without calling submit_extraction after {} iteration(s)",
+                    "Ollama stopped after {} iteration(s) — submit_extraction was never called (did the model exhaust its context?)",
                     iter + 1
                 );
             }
@@ -421,6 +421,7 @@ pub async fn call_ollama(
                             match ocr::scan_page(bytes.clone()).await {
                                 Ok(ocr_result) => {
                                     confidence_map.insert(page_num, ocr_result.mean_confidence);
+                                    log(&format!("    page {page_num}: OCR done (conf={:.0})", ocr_result.mean_confidence));
                                     debug!("[ollama] page={page_num} conf={:.1}", ocr_result.mean_confidence);
                                     serde_json::to_string(&ocr_result).unwrap_or_default()
                                 }
@@ -437,11 +438,12 @@ pub async fn call_ollama(
                         Ok(result) => extraction_result = Some(result),
                         Err(e) => return Err(e),
                     }
+                    log("    submit_extraction received — extraction complete");
                     found_submit = true;
                     "{\"status\":\"accepted\"}".to_string()
                 }
                 other => {
-                    format!("{{\"error\":\"unknown tool: {}\"}}", other)
+                    json!({"error": format!("unknown tool: {}", other)}).to_string()
                 }
             };
 
