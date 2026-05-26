@@ -181,6 +181,67 @@ fn build_ollama_content_blocks(pages: &[PageContent]) -> Vec<Value> {
 }
 
 // ---------------------------------------------------------------------------
+// Tool call parsing
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+struct OllamaToolCall {
+    id: String,
+    name: String,
+    arguments: Value,
+}
+
+#[allow(dead_code)]
+fn parse_ollama_tool_calls(response: &Value) -> Vec<OllamaToolCall> {
+    let tool_calls = match response["message"]["tool_calls"].as_array() {
+        Some(arr) => arr,
+        None => return vec![],
+    };
+    tool_calls.iter().filter_map(|call| {
+        let id = call["id"].as_str().unwrap_or("").to_string();
+        let name = call["function"]["name"].as_str().unwrap_or("").to_string();
+        // Ollama returns arguments as a JSON string, not a parsed object.
+        let args_str = call["function"]["arguments"].as_str().unwrap_or("{}");
+        let arguments = serde_json::from_str(args_str).unwrap_or(json!({}));
+        if name.is_empty() { None } else { Some(OllamaToolCall { id, name, arguments }) }
+    }).collect()
+}
+
+#[allow(dead_code)]
+fn parse_extraction_input(
+    input: &Value,
+    doc_type: &str,
+    schema: &SchemaRegistry,
+) -> anyhow::Result<ExtractionResult> {
+    let pages: Vec<PageText> = input["pages"]
+        .as_array()
+        .context("missing pages array in submit_extraction")?
+        .iter()
+        .map(|p| Ok(PageText {
+            page_num: p["page_num"].as_u64().unwrap_or(0) as u32,
+            text: p["text"].as_str().unwrap_or("").to_string(),
+        }))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let effective_fields = schema.effective_fields(doc_type);
+    let mut fields: HashMap<String, String> = HashMap::new();
+    for field in &effective_fields {
+        let raw = input[&field.name].as_str().unwrap_or("").to_string();
+        let normalised = schema.normalise(field, &raw);
+        if !normalised.is_empty() || field.required {
+            fields.insert(field.name.clone(), normalised);
+        }
+    }
+
+    Ok(ExtractionResult {
+        pages,
+        doc_type: doc_type.to_string(),
+        fields,
+        ocr_method: String::new(), // set by call_ollama after the loop
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Pass 1 — Type detection
 // ---------------------------------------------------------------------------
 
@@ -606,9 +667,10 @@ fn aggregate_method(labels: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_ollama_tools, build_ollama_content_blocks};
+    use super::{build_ollama_tools, build_ollama_content_blocks, parse_ollama_tool_calls, parse_extraction_input};
     use crate::schema::SchemaRegistry;
     use super::PageContent;
+    use serde_json::json;
 
     #[test]
     fn build_tools_has_openai_wrapper() {
@@ -667,5 +729,59 @@ mod tests {
         assert_eq!(blocks[1]["type"], "image_url");
         let url = blocks[1]["image_url"]["url"].as_str().unwrap();
         assert!(url.starts_with("data:image/jpeg;base64,"));
+    }
+
+    #[test]
+    fn parse_tool_calls_returns_empty_when_none() {
+        let response = json!({"message": {"role": "assistant", "content": "hi", "tool_calls": null}});
+        let calls = parse_ollama_tool_calls(&response);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_calls_parses_arguments_from_string() {
+        let response = json!({
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "ocr_scan",
+                        "arguments": "{\"page_num\": 3}"
+                    }
+                }]
+            }
+        });
+        let calls = parse_ollama_tool_calls(&response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "ocr_scan");
+        assert_eq!(calls[0].arguments["page_num"], 3);
+    }
+
+    #[test]
+    fn parse_extraction_input_maps_pages_and_fields() {
+        let schema = SchemaRegistry::default_schema();
+        let doc_type = schema.doc_type_default.clone();
+        let input = json!({
+            "pages": [{"page_num": 1, "text": "Sample text"}]
+        });
+        let result = parse_extraction_input(&input, &doc_type, &schema).unwrap();
+        assert_eq!(result.pages.len(), 1);
+        assert_eq!(result.pages[0].page_num, 1);
+        assert_eq!(result.pages[0].text, "Sample text");
+        assert_eq!(result.doc_type, doc_type);
+        assert!(result.ocr_method.is_empty()); // filled in by caller
+    }
+
+    #[test]
+    fn parse_extraction_input_fails_on_missing_pages() {
+        let schema = SchemaRegistry::default_schema();
+        let input = json!({"some_field": "value"});
+        let err = parse_extraction_input(&input, &schema.doc_type_default, &schema);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("missing pages array"));
     }
 }
