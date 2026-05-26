@@ -8,16 +8,12 @@
 //!   then send the text to Ollama's `/api/chat` endpoint for classification.
 //!
 //! **Pass 2 — Full extraction** (`call_ollama`):
-//!   Unlike the Claude backend's agentic tool-call loop, this backend uses a direct
-//!   sequential pipeline:
-//!   1. For each page, run Tesseract OCR locally and route based on confidence.
-//!   2. If an image page needs correction, send text + image to Ollama (vision model).
-//!   3. After all pages are processed, send the first image to Ollama once more to
-//!      extract structured metadata fields via a JSON prompt.
-//!
-//! There is no multi-turn conversation here — each Ollama call is independent.
-//! This is simpler and faster for local inference but does not benefit from the
-//! context-accumulation that Claude's agentic loop provides.
+//!   Agentic tool-calling loop: all pages (text labels + base64 images) are sent in one
+//!   user message alongside two tool definitions (`ocr_scan`, `submit_extraction`).
+//!   Qwen3.5:9B orchestrates its own OCR strategy — calling `ocr_scan` for each image
+//!   page and routing based on confidence — then submits the structured result via
+//!   `submit_extraction`. The Rust loop runs until `submit_extraction` is received or
+//!   the iteration cap is hit.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -70,6 +66,14 @@ After processing ALL pages, call submit_extraction exactly once with the complet
 
 Confidence thresholds: HIGH = 85.0, MEDIUM = 60.0";
 
+/// Build the two tool definitions for the agentic extraction loop in Ollama's
+/// OpenAI-compatible format: `{type:"function", function:{name, description, parameters}}`.
+///
+/// Key difference from `claude.rs::build_tools`: Ollama uses `parameters` (not
+/// `input_schema`) and wraps each tool in `{type:"function", function:{...}}`.
+///
+/// `submit_extraction`'s schema is generated dynamically from the `SchemaRegistry`
+/// for the detected `doc_type`, so the model only sees fields relevant to that class.
 #[allow(dead_code)]
 fn build_ollama_tools(schema: &SchemaRegistry, doc_type: &str) -> Value {
     let effective_fields = schema.effective_fields(doc_type);
@@ -576,6 +580,9 @@ mod tests {
             assert_eq!(tool["type"], "function");
             assert!(tool["function"]["name"].is_string());
             assert!(tool["function"]["parameters"]["type"].is_string());
+            let func = tool["function"].as_object().unwrap();
+            assert!(func.contains_key("parameters"), "tool must use 'parameters' key (not 'input_schema')");
+            assert!(!func.contains_key("input_schema"), "must not use Claude's 'input_schema' key");
         }
         // ocr_scan must require page_num
         let ocr = &tools_arr[0];
