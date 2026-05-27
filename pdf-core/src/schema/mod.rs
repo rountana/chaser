@@ -324,6 +324,8 @@ impl SchemaRegistry {
                 }
             }
         }
+        names.sort();
+        names.dedup();
         names
     }
 
@@ -942,6 +944,7 @@ account_holder = { type = "person",   required = false, searchable = true }
         assert!(names.contains(&"person"), "global searchable person should be included");
         assert!(names.contains(&"account_holder"), "type-level searchable person should be included");
         assert!(!names.contains(&"contact"), "non-searchable person should be excluded");
+        assert_eq!(names.len(), 2, "only the 2 searchable person fields should be returned");
     }
 
     #[test]
@@ -968,6 +971,7 @@ due_date     = { type = "date", required = false, searchable = false }
         assert!(names.contains(&"date"), "global searchable date should be included");
         assert!(!names.contains(&"invoice_date"), "non-searchable invoice_date should be excluded");
         assert!(!names.contains(&"due_date"), "non-searchable due_date should be excluded");
+        assert_eq!(names.len(), 1, "only the 1 searchable date field should be returned");
     }
 
     #[test]
