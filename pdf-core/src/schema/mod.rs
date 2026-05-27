@@ -272,43 +272,6 @@ impl SchemaRegistry {
         fields
     }
 
-    /// All field names whose type is Person, across global + all per-type sections.
-    pub fn all_person_field_names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = Vec::new();
-        for f in &self.global_fields {
-            if matches!(f.field_type, FieldType::Person) {
-                names.push(&f.name);
-            }
-        }
-        for fields in self.type_fields.values() {
-            for f in fields {
-                if matches!(f.field_type, FieldType::Person) {
-                    names.push(&f.name);
-                }
-            }
-        }
-        names
-    }
-
-    pub fn all_date_field_names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = Vec::new();
-        for f in &self.global_fields {
-            if matches!(f.field_type, FieldType::Date) {
-                names.push(&f.name);
-            }
-        }
-        for fields in self.type_fields.values() {
-            for f in fields {
-                if matches!(f.field_type, FieldType::Date) {
-                    names.push(&f.name);
-                }
-            }
-        }
-        names.sort();
-        names.dedup();
-        names
-    }
-
     /// All field names whose type is Person AND searchable = true, across global + all per-type sections.
     pub fn searchable_person_field_names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = Vec::new();

@@ -28,6 +28,10 @@ impl MetadataIndex {
     /// `person_field_names`: YAML keys for searchable person-name fields (from
     /// `SchemaRegistry::searchable_person_field_names()`). Pass `&["person"]` when
     /// running without a schema.
+    ///
+    /// `date_field_names`: YAML keys for searchable date fields (from
+    /// `SchemaRegistry::searchable_date_field_names()`). Pass `&["date"]` when
+    /// running without a schema.
     pub fn build(outputs_dir: &Path, person_field_names: &[&str], date_field_names: &[&str]) -> anyhow::Result<Self> {
         let mut entries = HashMap::new();
         let mut persons_set = std::collections::HashSet::new();
