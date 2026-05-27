@@ -292,7 +292,10 @@ impl SchemaRegistry {
         names
     }
 
-    /// All field names whose type is Date AND searchable = true, across global + all per-type sections.
+    /// Field names whose type is `date` (not `date_range`) AND `searchable = true`,
+    /// across global + all per-type sections. Used to populate `MetadataIndex` date
+    /// filtering; `date_range` fields are intentionally excluded as they are not
+    /// used for point-in-time date queries.
     pub fn searchable_date_field_names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = Vec::new();
         for f in &self.global_fields {
