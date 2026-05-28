@@ -2,6 +2,30 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum LlmBackend {
+    Claude,
+    Gemini,
+    Ollama,
+}
+
+impl Default for LlmBackend {
+    fn default() -> Self {
+        LlmBackend::Claude
+    }
+}
+
+impl std::fmt::Display for LlmBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LlmBackend::Claude => write!(f, "claude"),
+            LlmBackend::Gemini => write!(f, "gemini"),
+            LlmBackend::Ollama => write!(f, "ollama"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeConfig {
     pub model: String,
@@ -9,6 +33,8 @@ pub struct ClaudeConfig {
     pub base_url: Option<String>,
     pub source_dir: Option<String>,
     pub outputs_dir: Option<String>,
+    #[serde(default)]
+    pub backend: LlmBackend,
     #[serde(default)]
     pub ollama_url: Option<String>,
     #[serde(default)]
@@ -30,6 +56,7 @@ impl Default for ClaudeConfig {
             base_url: None,
             source_dir: None,
             outputs_dir: None,
+            backend: LlmBackend::Claude,
             ollama_url: None,
             ollama_model: None,
             schema_path: None,
@@ -72,6 +99,13 @@ impl ClaudeConfig {
         if let Ok(model) = std::env::var("PDF_LAB_OLLAMA_MODEL") {
             if !model.is_empty() { config.ollama_model = Some(model); }
         }
+        if let Ok(b) = std::env::var("PDF_LAB_BACKEND") {
+            config.backend = match b.to_lowercase().as_str() {
+                "gemini" => LlmBackend::Gemini,
+                "ollama" => LlmBackend::Ollama,
+                _ => LlmBackend::Claude,
+            };
+        }
         if let Ok(key) = std::env::var("GEMINI_API_KEY") {
             if !key.is_empty() { config.gemini_api_key = Some(key); }
         }
@@ -93,10 +127,7 @@ impl ClaudeConfig {
     }
 
     pub fn config_path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("pdf-lab")
-            .join("config.json")
+        PathBuf::from("config/pdf-lab/config.json")
     }
 
     /// Resolved outputs directory: CLI flag > config/env > "./outputs"
@@ -116,20 +147,12 @@ impl ClaudeConfig {
             .unwrap_or("https://api.anthropic.com")
     }
 
-    pub fn ocr_method(&self) -> &str {
-        if self.model.contains("haiku") {
-            "llm-claude-haiku"
-        } else {
-            "llm-claude-sonnet"
-        }
-    }
-
     pub fn ollama_base(&self) -> &str {
         self.ollama_url.as_deref().unwrap_or("http://localhost:11434")
     }
 
     pub fn resolved_ollama_model(&self) -> &str {
-        self.ollama_model.as_deref().unwrap_or("qwen3.5:9b")
+        self.ollama_model.as_deref().unwrap_or("qwen2.5vl:7b")
     }
 
     pub fn resolved_gemini_model(&self) -> &str {

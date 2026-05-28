@@ -1,0 +1,88 @@
+use super::{Backend, ResultMeta, SearchResult, index::MetadataIndex, intent::IntentSignals};
+
+/// Search the in-memory metadata index using pre-parsed intent signals.
+///
+/// AND-chain across non-empty signals. Multiple persons/doc_types use OR within their group.
+pub fn search(signals: &IntentSignals, index: &MetadataIndex) -> Vec<SearchResult> {
+    if signals.persons.is_empty() && signals.doc_types.is_empty() && signals.dates.is_empty() {
+        return vec![];
+    }
+
+    index
+        .entries
+        .values()
+        .filter(|meta| {
+            // Person: OR across all matched persons
+            if !signals.persons.is_empty() {
+                let any_person = signals.persons.iter().any(|p| {
+                    meta.person.to_lowercase().contains(&p.to_lowercase())
+                });
+                if !any_person {
+                    return false;
+                }
+            }
+
+            // Doc type: OR across all matched doc types
+            if !signals.doc_types.is_empty() {
+                let any_dt = signals.doc_types.iter().any(|dt| {
+                    meta.doc_type.to_lowercase() == dt.to_lowercase()
+                });
+                if !any_dt {
+                    return false;
+                }
+            }
+
+            // Date: OR across all matched dates; support year-only prefix match
+            if !signals.dates.is_empty() {
+                let any_date = signals.dates.iter().any(|date| {
+                    meta.date.starts_with(date.as_str())
+                });
+                if !any_date {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .map(|meta| {
+            let file_name = meta
+                .file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            SearchResult {
+                file_path: meta.file_path.clone(),
+                file_name,
+                snippet: meta.body_preview.clone(),
+                page_num: None,
+                backend: Backend::Metadata,
+                score: Some(1.0),
+                meta: ResultMeta {
+                    person: if meta.person.is_empty() { None } else { Some(meta.person.clone()) },
+                    doc_type: if meta.doc_type.is_empty() { None } else { Some(meta.doc_type.clone()) },
+                    date: if meta.date.is_empty() { None } else { Some(meta.date.clone()) },
+                    pages: if meta.pages > 0 { Some(meta.pages) } else { None },
+                    words: None,
+                    keyword: None,
+                },
+                source_path: meta.source_file.clone(),
+            }
+        })
+        .collect()
+}
+
+/// Perform 2-pass scoped search: first get matching stems from metadata, then pass to keyword.
+/// Returns the set of file stems that match the metadata filters (used by keyword backend for scoping).
+pub fn matching_stems(signals: &IntentSignals, index: &MetadataIndex) -> Vec<String> {
+    search(signals, index)
+        .into_iter()
+        .filter_map(|r| {
+            r.file_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        })
+        .collect()
+}

@@ -1,0 +1,22 @@
+[package]
+name = "pdf-lab"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "pdf-lab"
+path = "src/main.rs"
+
+[dependencies]
+pdf-core = { path = "../pdf-core" }
+clap = { version = "4", features = ["derive"] }
+rmcp = { version = "1", features = ["server", "transport-io"] }
+schemars = "1.0"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+dotenvy = "0.15"
+indicatif = "0.17"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }

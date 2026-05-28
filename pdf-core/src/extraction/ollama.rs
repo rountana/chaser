@@ -32,6 +32,17 @@ fn debug_enabled() -> bool {
     std::env::var("PDF_LAB_DEBUG").map(|v| !v.is_empty() && v != "0").unwrap_or(false)
 }
 
+/// Replace control characters (except newlines) with spaces.
+///
+/// Tabs, carriage returns, and other C0/C1 controls embedded in PDF text or OCR output
+/// end up in the model's context. When the model reproduces them inside a JSON string
+/// literal in its tool-call output, Ollama's parser rejects the whole request with a 500.
+fn sanitize_text(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+        .collect()
+}
+
 /// Convenience macro for debug-gated eprintln! calls.
 /// Using a macro avoids evaluating format arguments when debugging is off.
 macro_rules! debug {
@@ -39,41 +50,42 @@ macro_rules! debug {
 }
 
 const OLLAMA_SYSTEM_PROMPT: &str = "\
-You are a document extraction assistant with access to a local OCR tool.
+You are a document extraction assistant.
 
 ## Document pages
-Pages arrive as either embedded text (already extracted from the PDF) or as scanned images. Each page is labeled so you know which type it is.
 
-## Workflow for scanned image pages
-Each scanned image page is labeled:
-  [Page N — scanned image; call ocr_scan(page_num=N) first]
+Pages arrive in several labeled forms:
 
-For each such page:
-1. Call ocr_scan(page_num=N) to get local Tesseract OCR text and a confidence score (0-100).
-2. Choose ONE strategy based on mean_confidence:
-   - HIGH (>= 85): The OCR is reliable — use the OCR text verbatim.
-   - MEDIUM (60 <= conf < 85): The OCR has errors — correct obvious mistakes using your language model knowledge.
-   - LOW (< 60): The OCR is too unreliable — ignore it entirely. Read the image directly with your vision.
-
-## Workflow for embedded text pages
-Text pages are labeled:
   [Page N — embedded text]
-Do NOT call ocr_scan for these. Use the provided text as-is.
+    Text extracted directly from the PDF. Use as-is.
+
+  [Page N — OCR text (conf=NN)]
+    Tesseract OCR has already run. conf >= 85 is reliable; 60-84 may have minor errors
+    you should correct using context. Do NOT call ocr_scan for these pages.
+
+  [Page N — low OCR confidence (NN); use your vision]
+    OCR ran but was unreliable. Read the attached image directly with your vision.
+    The low-confidence OCR text is provided as a hint only.
+
+  [Page N — scanned image; call ocr_scan(page_num=N) first]
+    OCR has not run yet. Call ocr_scan(page_num=N), then apply the confidence strategy:
+    HIGH (>= 85) use verbatim, MEDIUM (60-84) correct errors, LOW (< 60) use vision.
 
 ## Final step
 After processing ALL pages, call submit_extraction exactly once with the complete structured result.
 
 Confidence thresholds: HIGH = 85.0, MEDIUM = 60.0";
 
-/// Build the two tool definitions for the agentic extraction loop in Ollama's
-/// OpenAI-compatible format: `{type:"function", function:{name, description, parameters}}`.
+/// Build tool definitions for the agentic extraction loop in Ollama's OpenAI-compatible
+/// format: `{type:"function", function:{name, description, parameters}}`.
 ///
-/// Key difference from `claude.rs::build_tools`: Ollama uses `parameters` (not
-/// `input_schema`) and wraps each tool in `{type:"function", function:{...}}`.
+/// `include_ocr_scan` controls whether the `ocr_scan` tool is included. It should be
+/// false when all image pages have been pre-OCR'd (most common case), since the model
+/// won't need to call it and a smaller tool list improves JSON generation reliability.
 ///
 /// `submit_extraction`'s schema is generated dynamically from the `SchemaRegistry`
 /// for the detected `doc_type`, so the model only sees fields relevant to that class.
-fn build_ollama_tools(schema: &SchemaRegistry, doc_type: &str) -> Value {
+fn build_ollama_tools(schema: &SchemaRegistry, doc_type: &str, include_ocr_scan: bool) -> Value {
     let effective_fields = schema.effective_fields(doc_type);
 
     let mut properties = serde_json::Map::new();
@@ -102,79 +114,105 @@ fn build_ollama_tools(schema: &SchemaRegistry, doc_type: &str) -> Value {
         }
     }
 
-    json!([
-        {
-            "type": "function",
-            "function": {
-                "name": "ocr_scan",
-                "description": "Run local Tesseract OCR on a scanned image page. \
-                                Returns text and a confidence score (0-100). \
-                                Call this for each scanned image page before submit_extraction.",
-                "parameters": {
-                    "type": "object",
-                    "required": ["page_num"],
-                    "properties": {
-                        "page_num": {
-                            "type": "integer",
-                            "description": "1-indexed page number of the scanned image to OCR."
+    let submit_tool = json!({
+        "type": "function",
+        "function": {
+            "name": "submit_extraction",
+            "description": "Submit the structured extraction result. \
+                            Call exactly once after processing all pages.",
+            "parameters": {
+                "type": "object",
+                "required": required_fields,
+                "properties": properties
+            }
+        }
+    });
+
+    if include_ocr_scan {
+        json!([
+            {
+                "type": "function",
+                "function": {
+                    "name": "ocr_scan",
+                    "description": "Run local Tesseract OCR on a scanned image page. \
+                                    Returns text and a confidence score (0-100). \
+                                    Call this only for pages labeled 'scanned image; call ocr_scan first'.",
+                    "parameters": {
+                        "type": "object",
+                        "required": ["page_num"],
+                        "properties": {
+                            "page_num": {
+                                "type": "integer",
+                                "description": "1-indexed page number of the scanned image to OCR."
+                            }
                         }
                     }
                 }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "submit_extraction",
-                "description": "Submit the structured extraction result. \
-                                Call exactly once after processing all pages.",
-                "parameters": {
-                    "type": "object",
-                    "required": required_fields,
-                    "properties": properties
-                }
-            }
-        }
-    ])
+            },
+            submit_tool
+        ])
+    } else {
+        json!([submit_tool])
+    }
 }
 
-/// Build content blocks for the agentic extraction loop in Ollama's content format.
+/// Build the initial user message for the agentic extraction loop in Ollama's native format.
 ///
-/// Converts a list of pages (text + images) into a format suitable for sending to
-/// Ollama's chat API alongside tool definitions. Each page becomes one or more blocks:
-/// - Text pages: single `{type:"text", text:"[Page N — embedded text]\n{text}"}` block.
-/// - Image pages: text label block + `{type:"image_url", image_url:{url:"data:{media_type};base64,{b64}"}}` block.
+/// `pre_ocr` contains results from the upfront Tesseract pass run before calling the LLM.
+/// HIGH/MEDIUM confidence pages are sent as text labels (no image bytes). LOW confidence
+/// pages include the image so the model can use vision directly. Pages absent from `pre_ocr`
+/// (OCR failed or unavailable) fall back to the old "call ocr_scan first" path.
 ///
-/// This mirrors `claude.rs::build_content_blocks()` but uses Ollama's image format.
-fn build_ollama_content_blocks(pages: &[PageContent]) -> Vec<Value> {
-    // Output is for the OpenAI-compat /api/chat endpoint (Ollama format).
-    let mut blocks = Vec::new();
+/// Ollama's `/api/chat` endpoint requires `content` to be a plain string. Images are sent
+/// in a separate `"images"` array of raw base64 strings (no data-URI prefix).
+fn build_ollama_user_message(pages: &[PageContent], pre_ocr: &HashMap<u32, ocr::OcrResult>) -> Value {
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut images: Vec<String> = Vec::new();
+
     for page in pages {
         match page {
             PageContent::Text { page_num, text } => {
-                blocks.push(json!({
-                    "type": "text",
-                    "text": format!("[Page {page_num} — embedded text]\n{text}")
-                }));
+                text_parts.push(format!("[Page {page_num} — embedded text]\n{}", sanitize_text(text)));
             }
-            PageContent::Image { page_num, data, media_type } => {
-                blocks.push(json!({
-                    "type": "text",
-                    "text": format!(
-                        "[Page {page_num} — scanned image; call ocr_scan(page_num={page_num}) first]"
-                    )
-                }));
-                let b64 = BASE64.encode(data);
-                blocks.push(json!({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": format!("data:{media_type};base64,{b64}")
+            PageContent::Image { page_num, data, .. } => {
+                if let Some(result) = pre_ocr.get(page_num) {
+                    match ocr::OcrPath::from_confidence(result.mean_confidence) {
+                        ocr::OcrPath::TesseractOnly | ocr::OcrPath::TesseractLlmCleanup => {
+                            // Reliable enough — send as text, no image bytes needed.
+                            text_parts.push(format!(
+                                "[Page {page_num} — OCR text (conf={:.0})]\n{}",
+                                result.mean_confidence,
+                                sanitize_text(&result.text)
+                            ));
+                        }
+                        ocr::OcrPath::LlmVision => {
+                            // Low confidence — include the image; hint with OCR text.
+                            text_parts.push(format!(
+                                "[Page {page_num} — low OCR confidence ({:.0}); use your vision]\n{}",
+                                result.mean_confidence,
+                                sanitize_text(&result.text)
+                            ));
+                            images.push(BASE64.encode(data));
+                        }
+                        ocr::OcrPath::SkippedTextPage => unreachable!(),
                     }
-                }));
+                } else {
+                    // Pre-OCR unavailable — send image and ask model to call ocr_scan.
+                    text_parts.push(format!(
+                        "[Page {page_num} — scanned image; call ocr_scan(page_num={page_num}) first]"
+                    ));
+                    images.push(BASE64.encode(data));
+                }
             }
         }
     }
-    blocks
+
+    let content = text_parts.join("\n\n");
+    if images.is_empty() {
+        json!({"role": "user", "content": content})
+    } else {
+        json!({"role": "user", "content": content, "images": images})
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -216,15 +254,17 @@ fn parse_extraction_input(
     doc_type: &str,
     schema: &SchemaRegistry,
 ) -> anyhow::Result<ExtractionResult> {
+    // `pages` is treated as optional here: smaller local models sometimes omit it.
+    // The caller patches in fallback page texts if the result comes back empty.
     let pages: Vec<PageText> = input["pages"]
         .as_array()
-        .context("missing pages array in submit_extraction")?
-        .iter()
-        .map(|p| Ok(PageText {
-            page_num: p["page_num"].as_u64().unwrap_or(0) as u32,
-            text: p["text"].as_str().unwrap_or("").to_string(),
-        }))
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .map(|arr| {
+            arr.iter().map(|p| PageText {
+                page_num: p["page_num"].as_u64().unwrap_or(0) as u32,
+                text: p["text"].as_str().unwrap_or("").to_string(),
+            }).collect()
+        })
+        .unwrap_or_default();
 
     let effective_fields = schema.effective_fields(doc_type);
     let mut fields: HashMap<String, String> = HashMap::new();
@@ -239,6 +279,7 @@ fn parse_extraction_input(
     Ok(ExtractionResult {
         pages,
         doc_type: doc_type.to_string(),
+        doc_category: String::new(), // set by extract_one after pipeline routing
         fields,
         ocr_method: String::new(), // set by call_ollama after the loop
     })
@@ -274,10 +315,11 @@ pub async fn classify_doc_type(
 
     // 30-second timeout is generous for a local model on a typical machine.
     let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
-    let prompt = format!("{}\n\nDocument text:\n{}", schema.build_type_detection_prompt(), first_text);
+    let prompt = format!("{}\n\nDocument text:\n{}", schema.build_type_detection_prompt(), sanitize_text(&first_text));
     let raw = text_call(&client, config.ollama_base(), config.resolved_ollama_model(), &prompt).await?;
-    // normalise_doc_type handles casing, whitespace, and partial matches.
-    Ok(schema.normalise_doc_type(raw.trim()))
+    // coerce_doc_type handles known types (fuzzy match) and free-text snake_case
+    // labels that the model returns when no known type fits the document.
+    Ok(schema.coerce_doc_type(raw.trim()))
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +335,9 @@ async fn text_call(client: &Client, base_url: &str, model: &str, prompt: &str) -
         // stream: false returns the full response in one JSON object instead of
         // a stream of newline-delimited chunks, making parsing straightforward.
         "stream": false,
+        // Disable Qwen3 thinking mode — this is a simple classification call and
+        // thinking tokens add latency with no accuracy benefit here.
+        "think": false,
         "messages": [{"role": "user", "content": prompt}]
     });
     let resp = client.post(&url).json(&body).send().await.context("calling Ollama /api/chat")?;
@@ -335,9 +380,11 @@ pub async fn call_ollama(
         test_connection(config).await.context("Ollama is not available")?;
     }
 
-    // 120s per turn: vision + thinking can be slow on local hardware.
+    // Scale timeout with document size: base 180s + 30s per page, capped at 600s.
+    // Large documents (many pages of text or images) need more inference time on local hardware.
+    let timeout_secs = (180u64 + pages.len() as u64 * 30).min(600);
     let client = Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(timeout_secs))
         .build()?;
     let base_url = config.ollama_base();
     let model = config.resolved_ollama_model();
@@ -354,24 +401,72 @@ pub async fn call_ollama(
         })
         .collect();
 
-    let image_page_count = image_map.len();
-    let max_iters = std::cmp::max(5, image_page_count * 2 + 2);
+    // Pre-OCR all image pages concurrently. HIGH/MEDIUM confidence pages become text
+    // in the user message (no image bytes sent to Ollama). LOW confidence pages retain
+    // their images so the model can apply vision directly.
+    let mut pre_ocr: HashMap<u32, ocr::OcrResult> = HashMap::new();
+    if !image_map.is_empty() {
+        let mut join_set = tokio::task::JoinSet::new();
+        for (&page_num, bytes) in &image_map {
+            let bytes = bytes.clone();
+            join_set.spawn(async move {
+                let start = std::time::Instant::now();
+                let result = ocr::scan_page(bytes).await;
+                (page_num, result, start.elapsed())
+            });
+        }
+        while let Some(join_result) = join_set.join_next().await {
+            if let Ok((page_num, Ok(ocr_result), elapsed)) = join_result {
+                log(&format!("    page {page_num}: OCR done ({:.1}s, conf={:.0})",
+                    elapsed.as_secs_f32(), ocr_result.mean_confidence));
+                pre_ocr.insert(page_num, ocr_result);
+            }
+        }
+    }
 
-    let content_blocks = build_ollama_content_blocks(pages);
-    let tools = build_ollama_tools(schema, doc_type);
+    // Unprocessed pages (OCR failed) still need the ocr_scan tool as a fallback.
+    let has_unprocessed = image_map.keys().any(|p| !pre_ocr.contains_key(p));
+    // Each unprocessed page may need up to 2 iterations (ocr_scan + submit); pre-OCR'd
+    // pages need at most 1. Cap at 3 as the floor so there's always room for submit.
+    let unprocessed_count = image_map.keys().filter(|p| !pre_ocr.contains_key(p)).count();
+    let max_iters = std::cmp::max(3, unprocessed_count * 2 + 2);
+
+    let user_message = build_ollama_user_message(pages, &pre_ocr);
+    let tools = build_ollama_tools(schema, doc_type, has_unprocessed);
 
     let mut messages: Vec<Value> = vec![
         json!({"role": "system", "content": OLLAMA_SYSTEM_PROMPT}),
-        json!({"role": "user", "content": content_blocks}),
+        user_message,
     ];
 
     let mut confidence_map: HashMap<u32, f32> = HashMap::new();
     let mut extraction_result: Option<ExtractionResult> = None;
 
+    // Fallback page texts: pre-seeded from embedded text pages and pre-OCR results,
+    // then augmented as any live ocr_scan results come back.
+    let mut page_text_fallback: HashMap<u32, String> = pages.iter().filter_map(|p| {
+        if let PageContent::Text { page_num, text } = p {
+            Some((*page_num, text.clone()))
+        } else {
+            None
+        }
+    }).collect();
+
+    // Seed confidence_map and page_text_fallback from pre-OCR results upfront so
+    // aggregate_ocr_method is correct even when the model skips ocr_scan entirely.
+    for (&page_num, ocr_result) in &pre_ocr {
+        confidence_map.insert(page_num, ocr_result.mean_confidence);
+        page_text_fallback.insert(page_num, sanitize_text(&ocr_result.text));
+    }
+
     for iter in 0..max_iters {
         let body = json!({
             "model": model,
             "stream": false,
+            // Disable Qwen3 thinking mode — the agentic loop calls this endpoint
+            // multiple times per document; thinking tokens per iteration multiply
+            // into significant latency with no benefit for structured extraction.
+            "think": false,
             "messages": messages,
             "tools": tools
         });
@@ -415,22 +510,32 @@ pub async fn call_ollama(
             let result_content = match tool_call.name.as_str() {
                 "ocr_scan" => {
                     let page_num = tool_call.arguments["page_num"].as_u64().unwrap_or(0) as u32;
-                    log(&format!("    page {page_num}: OCR..."));
-                    match image_map.get(&page_num) {
-                        Some(bytes) => {
-                            match ocr::scan_page(bytes.clone()).await {
-                                Ok(ocr_result) => {
-                                    confidence_map.insert(page_num, ocr_result.mean_confidence);
-                                    log(&format!("    page {page_num}: OCR done (conf={:.0})", ocr_result.mean_confidence));
-                                    debug!("[ollama] page={page_num} conf={:.1}", ocr_result.mean_confidence);
-                                    serde_json::to_string(&ocr_result).unwrap_or_default()
+                    // Serve pre-computed result if available — avoids re-running Tesseract.
+                    if let Some(cached) = pre_ocr.get(&page_num) {
+                        let clean_text = sanitize_text(&cached.text);
+                        confidence_map.insert(page_num, cached.mean_confidence);
+                        page_text_fallback.insert(page_num, clean_text.clone());
+                        log(&format!("    page {page_num}: OCR done (cached, conf={:.0})", cached.mean_confidence));
+                        json!({"text": clean_text, "mean_confidence": cached.mean_confidence}).to_string()
+                    } else {
+                        match image_map.get(&page_num) {
+                            Some(bytes) => {
+                                match ocr::scan_page(bytes.clone()).await {
+                                    Ok(ocr_result) => {
+                                        let clean_text = sanitize_text(&ocr_result.text);
+                                        confidence_map.insert(page_num, ocr_result.mean_confidence);
+                                        page_text_fallback.insert(page_num, clean_text.clone());
+                                        log(&format!("    page {page_num}: OCR done (conf={:.0})", ocr_result.mean_confidence));
+                                        debug!("[ollama] page={page_num} conf={:.1}", ocr_result.mean_confidence);
+                                        json!({"text": clean_text, "mean_confidence": ocr_result.mean_confidence}).to_string()
+                                    }
+                                    Err(e) => json!({"error": e.to_string()}).to_string(),
                                 }
-                                Err(e) => json!({"error": e.to_string()}).to_string(),
                             }
+                            None => json!({
+                                "error": format!("page {} is not a scanned image page", page_num)
+                            }).to_string(),
                         }
-                        None => json!({
-                            "error": format!("page {} is not a scanned image page", page_num)
-                        }).to_string(),
                     }
                 }
                 "submit_extraction" => {
@@ -462,6 +567,16 @@ pub async fn call_ollama(
 
     let mut result = extraction_result
         .context("max iterations reached without a submit_extraction call")?;
+
+    // If the model omitted the pages array, synthesize it from collected OCR/text.
+    if result.pages.is_empty() && !page_text_fallback.is_empty() {
+        let mut page_nums: Vec<u32> = page_text_fallback.keys().cloned().collect();
+        page_nums.sort_unstable();
+        result.pages = page_nums.into_iter().map(|n| PageText {
+            page_num: n,
+            text: page_text_fallback[&n].clone(),
+        }).collect();
+    }
 
     let paths: Vec<ocr::OcrPath> = pages.iter().map(|p| {
         match p {
@@ -526,18 +641,19 @@ pub async fn test_connection(config: &ClaudeConfig) -> anyhow::Result<std::time:
 
 #[cfg(test)]
 mod tests {
-    use super::{build_ollama_tools, build_ollama_content_blocks, parse_ollama_tool_calls, parse_extraction_input, call_ollama};
+    use super::{build_ollama_tools, build_ollama_user_message, parse_ollama_tool_calls, parse_extraction_input, call_ollama};
     use crate::schema::SchemaRegistry;
-    use super::PageContent;
+    use super::{PageContent, ocr};
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn build_tools_has_openai_wrapper() {
         let schema = SchemaRegistry::default_schema();
-        let tools = build_ollama_tools(&schema, &schema.doc_type_default);
+        // include_ocr_scan=true: both tools present
+        let tools = build_ollama_tools(&schema, &schema.doc_type_default, true);
         let tools_arr = tools.as_array().unwrap();
         assert_eq!(tools_arr.len(), 2);
-        // Every tool must be wrapped in {type:"function", function:{...}}
         for tool in tools_arr {
             assert_eq!(tool["type"], "function");
             assert!(tool["function"]["name"].is_string());
@@ -546,13 +662,11 @@ mod tests {
             assert!(func.contains_key("parameters"), "tool must use 'parameters' key (not 'input_schema')");
             assert!(!func.contains_key("input_schema"), "must not use Claude's 'input_schema' key");
         }
-        // ocr_scan must require page_num
-        let ocr = &tools_arr[0];
-        assert_eq!(ocr["function"]["name"], "ocr_scan");
-        assert!(ocr["function"]["parameters"]["required"]
+        let ocr_tool = &tools_arr[0];
+        assert_eq!(ocr_tool["function"]["name"], "ocr_scan");
+        assert!(ocr_tool["function"]["parameters"]["required"]
             .as_array().unwrap()
             .iter().any(|v| v == "page_num"));
-        // submit_extraction must require pages
         let submit = &tools_arr[1];
         assert_eq!(submit["function"]["name"], "submit_extraction");
         assert!(submit["function"]["parameters"]["required"]
@@ -561,33 +675,88 @@ mod tests {
     }
 
     #[test]
-    fn content_blocks_text_page() {
+    fn build_tools_omits_ocr_scan_when_all_preocrd() {
+        let schema = SchemaRegistry::default_schema();
+        // include_ocr_scan=false: only submit_extraction
+        let tools = build_ollama_tools(&schema, &schema.doc_type_default, false);
+        let tools_arr = tools.as_array().unwrap();
+        assert_eq!(tools_arr.len(), 1);
+        assert_eq!(tools_arr[0]["function"]["name"], "submit_extraction");
+    }
+
+    #[test]
+    fn user_message_text_page() {
         let pages = vec![PageContent::Text {
             page_num: 1,
             text: "hello world".to_string(),
         }];
-        let blocks = build_ollama_content_blocks(&pages);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0]["type"], "text");
-        assert!(blocks[0]["text"].as_str().unwrap().contains("[Page 1 — embedded text]"));
-        assert!(blocks[0]["text"].as_str().unwrap().contains("hello world"));
+        let msg = build_ollama_user_message(&pages, &HashMap::new());
+        assert_eq!(msg["role"], "user");
+        let content = msg["content"].as_str().unwrap();
+        assert!(content.contains("[Page 1 — embedded text]"));
+        assert!(content.contains("hello world"));
+        assert!(msg.get("images").is_none() || msg["images"].as_array().map(|a| a.is_empty()).unwrap_or(true));
     }
 
     #[test]
-    fn content_blocks_image_page() {
+    fn user_message_image_page_no_preocr_sends_image_with_ocr_scan_label() {
+        // When pre_ocr is empty, falls back to "call ocr_scan first" path.
         let pages = vec![PageContent::Image {
             page_num: 2,
-            data: vec![0xFF, 0xD8, 0xFF], // minimal JPEG magic bytes
+            data: vec![0xFF, 0xD8, 0xFF],
             media_type: "image/jpeg".to_string(),
         }];
-        let blocks = build_ollama_content_blocks(&pages);
-        // Text label + image_url block
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0]["type"], "text");
-        assert!(blocks[0]["text"].as_str().unwrap().contains("ocr_scan(page_num=2)"));
-        assert_eq!(blocks[1]["type"], "image_url");
-        let url = blocks[1]["image_url"]["url"].as_str().unwrap();
-        assert!(url.starts_with("data:image/jpeg;base64,"));
+        let msg = build_ollama_user_message(&pages, &HashMap::new());
+        assert_eq!(msg["role"], "user");
+        let content = msg["content"].as_str().unwrap();
+        assert!(content.contains("ocr_scan(page_num=2)"), "fallback path should reference ocr_scan");
+        let images = msg["images"].as_array().unwrap();
+        assert_eq!(images.len(), 1);
+        let b64 = images[0].as_str().unwrap();
+        assert!(!b64.starts_with("data:"), "Ollama images must be raw base64, not a data URI");
+    }
+
+    #[test]
+    fn user_message_image_page_high_confidence_sends_no_image() {
+        // HIGH confidence pre-OCR: model receives text only, no image bytes.
+        let pages = vec![PageContent::Image {
+            page_num: 1,
+            data: vec![0xFF, 0xD8, 0xFF],
+            media_type: "image/jpeg".to_string(),
+        }];
+        let mut pre_ocr = HashMap::new();
+        pre_ocr.insert(1u32, ocr::OcrResult {
+            text: "Invoice total: $100".to_string(),
+            mean_confidence: 90.0,
+            words: vec![],
+        });
+        let msg = build_ollama_user_message(&pages, &pre_ocr);
+        let content = msg["content"].as_str().unwrap();
+        assert!(content.contains("OCR text (conf=90)"), "should use OCR text label");
+        assert!(content.contains("Invoice total: $100"));
+        assert!(msg.get("images").is_none() || msg["images"].as_array().map(|a| a.is_empty()).unwrap_or(true),
+            "no image should be sent for high-confidence pages");
+    }
+
+    #[test]
+    fn user_message_image_page_low_confidence_sends_image() {
+        // LOW confidence pre-OCR: model still receives the image for direct vision.
+        let pages = vec![PageContent::Image {
+            page_num: 1,
+            data: vec![0xFF, 0xD8, 0xFF],
+            media_type: "image/jpeg".to_string(),
+        }];
+        let mut pre_ocr = HashMap::new();
+        pre_ocr.insert(1u32, ocr::OcrResult {
+            text: "garbled text".to_string(),
+            mean_confidence: 35.0,
+            words: vec![],
+        });
+        let msg = build_ollama_user_message(&pages, &pre_ocr);
+        let content = msg["content"].as_str().unwrap();
+        assert!(content.contains("low OCR confidence"), "should flag low confidence");
+        let images = msg["images"].as_array().unwrap();
+        assert_eq!(images.len(), 1, "image must be sent for low-confidence pages");
     }
 
     #[test]
@@ -679,16 +848,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_extraction_input_fails_on_missing_pages() {
+    fn parse_extraction_input_returns_empty_pages_when_missing() {
+        // Smaller local models sometimes omit the pages array; we treat it as empty
+        // rather than an error so the caller can patch in fallback OCR text.
         let schema = SchemaRegistry::default_schema();
         let input = json!({"some_field": "value"});
-        let err = parse_extraction_input(&input, &schema.doc_type_default, &schema);
-        assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("missing pages array"));
+        let result = parse_extraction_input(&input, &schema.doc_type_default, &schema).unwrap();
+        assert!(result.pages.is_empty());
     }
 
     #[tokio::test]
-    #[ignore = "requires local Ollama with qwen3.5:9b pulled — run: PDF_LAB_DEBUG=1 cargo test -p pdf-core -- live_agentic_loop --include-ignored --nocapture"]
+    #[ignore = "requires local Ollama with qwen2.5vl:7b pulled — run: PDF_LAB_DEBUG=1 cargo test -p pdf-core -- live_agentic_loop --include-ignored --nocapture"]
     async fn live_agentic_loop_text_only_doc() {
         // Uses a text-only page — no Tesseract required, no image upload.
         // Verifies the loop terminates and submit_extraction is called.

@@ -1,0 +1,3 @@
+[workspace]
+members = ["pdf-lab", "pdf-core"]
+resolver = "2"

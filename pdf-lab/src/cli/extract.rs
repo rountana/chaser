@@ -9,7 +9,7 @@ use serde_json::json;
 
 use pdf_core::{
     config::{ClaudeConfig, LlmBackend},
-    extraction::{PageContent, claude, enrich, gemini, ollama, pdfium, suggest},
+    extraction::{PageContent, claude, enrich, gemini, ollama, pdfium, suggest, table},
     frontmatter,
     schema::{FieldDef, SchemaRegistry},
     search::index::MetadataIndex,
@@ -178,7 +178,8 @@ pub async fn run(args: ExtractArgs) -> anyhow::Result<()> {
         }
 
         let file_start = Instant::now();
-        match extract_one(path, &config, &mut schema, &outputs_dir, scan_root.as_deref(), &index.known_persons, args.json, args.auto_schema, bar.as_ref()).await {
+        let ctx = FileContext::new(path.clone());
+        match ctx.run(&config, &mut schema, &outputs_dir, &index.known_persons, args.json, args.auto_schema, bar.as_ref()).await {
             Ok((output_path, ocr_method)) => {
                 let file_elapsed = file_start.elapsed();
                 let char_count = std::fs::read_to_string(&output_path)
@@ -216,12 +217,17 @@ pub async fn run(args: ExtractArgs) -> anyhow::Result<()> {
         pb.finish_and_clear();
     }
 
-    print_report(&completed, error_count, args.json, total_start.elapsed());
+    let model_name = match config.backend {
+        LlmBackend::Gemini => config.resolved_gemini_model().to_string(),
+        LlmBackend::Claude => config.model.clone(),
+        LlmBackend::Ollama => config.resolved_ollama_model().to_string(),
+    };
+    print_report(&completed, error_count, args.json, total_start.elapsed(), &model_name);
 
     Ok(())
 }
 
-fn print_report(completed: &[FileReport], error_count: usize, json_mode: bool, elapsed: Duration) {
+fn print_report(completed: &[FileReport], error_count: usize, json_mode: bool, elapsed: Duration, model_name: &str) {
     if json_mode {
         let entries: Vec<_> = completed.iter().map(|r| json!({
             "file": r.file_name,
@@ -230,7 +236,7 @@ fn print_report(completed: &[FileReport], error_count: usize, json_mode: bool, e
             "ocr_method": r.ocr_method,
             "chars_extracted": r.char_count,
         })).collect();
-        println!("{}", json!({"event":"report","files":entries,"errors":error_count,"elapsed_ms":elapsed.as_millis()}));
+        println!("{}", json!({"event":"report","model":model_name,"files":entries,"errors":error_count,"elapsed_ms":elapsed.as_millis()}));
         return;
     }
 
@@ -244,7 +250,7 @@ fn print_report(completed: &[FileReport], error_count: usize, json_mode: bool, e
 
     eprintln!();
     eprintln!("{bar}");
-    eprintln!("  Extract report  {total} file{}", if total == 1 { "" } else { "s" });
+    eprintln!("  Extract report  {total} file{}  [{}]", if total == 1 { "" } else { "s" }, model_name);
     eprintln!("{bar}");
 
     for r in completed {
@@ -304,18 +310,27 @@ fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn extract_one(
-    path: &PathBuf,
-    config: &ClaudeConfig,
-    schema: &mut SchemaRegistry,
-    outputs_dir: &PathBuf,
-    source_root: Option<&Path>,
-    known_persons: &[String],
-    json_mode: bool,
-    auto_schema: bool,
-    bar: Option<&ProgressBar>,
-) -> anyhow::Result<(PathBuf, String)> {
-    let ext = path
+struct FileContext {
+    path: PathBuf,
+}
+
+impl FileContext {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    async fn run(
+        self,
+        config: &ClaudeConfig,
+        schema: &mut SchemaRegistry,
+        outputs_dir: &PathBuf,
+        known_persons: &[String],
+        json_mode: bool,
+        auto_schema: bool,
+        bar: Option<&ProgressBar>,
+    ) -> anyhow::Result<(PathBuf, String)> {
+        let path = &self.path;
+        let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
@@ -346,6 +361,12 @@ async fn extract_one(
         }
         other => anyhow::bail!("Unsupported file type: .{other}"),
     };
+
+    // Determine pipeline branch before any LLM call.
+    // Image source files and PDFs with any scanned pages go through the image pipeline.
+    let is_image_source = matches!(ext.as_str(), "jpg" | "jpeg" | "png");
+    let has_image_pages = pages.iter().any(|p| p.is_image());
+    let doc_category = if is_image_source || has_image_pages { "image" } else { "text" };
 
     let backend = &config.backend;
 
@@ -399,7 +420,6 @@ async fn extract_one(
     if auto_schema
         && doc_type != schema.doc_type_default
         && !schema.type_fields.contains_key(&doc_type)
-        && !config.api_key.is_empty()
     {
         if let Some(pb) = bar { pb.set_message("suggesting schema fields..."); }
         else if !json_mode { eprintln!("  → suggesting fields for new type: {doc_type}"); }
@@ -416,9 +436,20 @@ async fn extract_one(
             .map(|f| f.name.as_str())
             .collect();
 
-        match suggest::call_claude_suggest_fields(
-            &first_page_text, &doc_type, &global_names, config,
-        ).await {
+        let suggest_result = match backend {
+            LlmBackend::Ollama => {
+                suggest::call_ollama_suggest_fields(
+                    &first_page_text, &doc_type, &global_names, config,
+                ).await
+            }
+            LlmBackend::Claude | LlmBackend::Gemini => {
+                suggest::call_claude_suggest_fields(
+                    &first_page_text, &doc_type, &global_names, config,
+                ).await
+            }
+        };
+
+        match suggest_result {
             Ok(suggested) if !suggested.is_empty() => {
                 let field_defs: Vec<FieldDef> = suggested.into_iter().map(|s| FieldDef {
                     name: s.name,
@@ -445,86 +476,142 @@ async fn extract_one(
         }
     }
 
-    // Pass 2: extraction
-    let (result, enrich_backend) = match backend {
-        LlmBackend::Gemini => {
-            if let Some(pb) = bar { pb.set_message(format!("extracting fields (Gemini {})...", config.resolved_gemini_model())); }
-            else if !json_mode { eprintln!("  → Gemini ({}) extracting...", config.resolved_gemini_model()); }
-            let r = gemini::call_gemini(&pages, config, schema, &doc_type)
-                .await
-                .with_context(|| format!("Gemini extraction for {file_name}"))?;
-            (r, Some(LlmBackend::Gemini))
-        }
-        LlmBackend::Claude => {
-            if let Some(pb) = bar { pb.set_message("extracting fields (Claude)..."); }
-            else if !json_mode { eprintln!("  → Claude extracting fields..."); }
-            let r = claude::call_claude(&pages, config, schema, &doc_type)
-                .await
-                .with_context(|| format!("Claude extraction for {file_name}"))?;
-            (r, Some(LlmBackend::Claude))
-        }
-        LlmBackend::Ollama => {
-            if let Some(pb) = bar { pb.set_message(format!("Ollama ({})...", config.resolved_ollama_model())); }
-            else if !json_mode { eprintln!("  → Ollama ({}) extracting...", config.resolved_ollama_model()); }
-            let r = ollama::call_ollama(&pages, config, schema, &doc_type, log.as_ref())
-                .await
-                .with_context(|| format!("Ollama extraction failed for {file_name}"))?;
-            (r, None)
-        }
+    // Branch: text pipeline vs image pipeline
+    let (mut result, enrichment) = if doc_category == "text" {
+        // ── Text pipeline ────────────────────────────────────────────────────
+        // Pass 2: table reformatting
+        let extraction_pages: Vec<PageContent> = match backend {
+            LlmBackend::Claude => {
+                if let Some(pb) = bar { pb.set_message("reformatting tables..."); }
+                else if !json_mode { eprintln!("  → reformatting tables (Claude)..."); }
+                match table::call_claude_table_reformat(&pages, config).await {
+                    Ok(p) => p,
+                    Err(err) => {
+                        let msg = format!("    ⚠ table reformat skipped: {err:#}");
+                        if let Some(pb) = bar { pb.println(&msg); }
+                        else if !json_mode { eprintln!("{msg}"); }
+                        pages.clone()
+                    }
+                }
+            }
+            LlmBackend::Gemini => {
+                if let Some(pb) = bar { pb.set_message("reformatting tables (Gemini)..."); }
+                else if !json_mode { eprintln!("  → reformatting tables (Gemini)..."); }
+                match table::call_gemini_table_reformat(&pages, config).await {
+                    Ok(p) => p,
+                    Err(err) => {
+                        let msg = format!("    ⚠ table reformat skipped: {err:#}");
+                        if let Some(pb) = bar { pb.println(&msg); }
+                        else if !json_mode { eprintln!("{msg}"); }
+                        pages.clone()
+                    }
+                }
+            }
+            LlmBackend::Ollama => pages.clone(), // Ollama: skip table reformat
+        };
+
+        // Pass 3: schema extraction on reformatted pages
+        let r = match backend {
+            LlmBackend::Gemini => {
+                if let Some(pb) = bar { pb.set_message(format!("extracting fields (Gemini {})...", config.resolved_gemini_model())); }
+                else if !json_mode { eprintln!("  → Gemini ({}) extracting...", config.resolved_gemini_model()); }
+                gemini::call_gemini(&extraction_pages, config, schema, &doc_type)
+                    .await
+                    .with_context(|| format!("Gemini extraction for {file_name}"))?
+            }
+            LlmBackend::Claude => {
+                if let Some(pb) = bar { pb.set_message("extracting fields (Claude)..."); }
+                else if !json_mode { eprintln!("  → Claude extracting fields..."); }
+                claude::call_claude(&extraction_pages, config, schema, &doc_type)
+                    .await
+                    .with_context(|| format!("Claude extraction for {file_name}"))?
+            }
+            LlmBackend::Ollama => {
+                if let Some(pb) = bar { pb.set_message(format!("Ollama ({})...", config.resolved_ollama_model())); }
+                else if !json_mode { eprintln!("  → Ollama ({}) extracting...", config.resolved_ollama_model()); }
+                ollama::call_ollama(&extraction_pages, config, schema, &doc_type, log.as_ref())
+                    .await
+                    .with_context(|| format!("Ollama extraction failed for {file_name}"))?
+            }
+        };
+        // Text documents: no enrichment pass
+        (r, None)
+    } else {
+        // ── Image pipeline ───────────────────────────────────────────────────
+        // Pass 2: vision extraction (agentic loop, pages sent as-is)
+        let r = match backend {
+            LlmBackend::Gemini => {
+                if let Some(pb) = bar { pb.set_message(format!("extracting fields (Gemini {})...", config.resolved_gemini_model())); }
+                else if !json_mode { eprintln!("  → Gemini ({}) extracting...", config.resolved_gemini_model()); }
+                gemini::call_gemini(&pages, config, schema, &doc_type)
+                    .await
+                    .with_context(|| format!("Gemini extraction for {file_name}"))?
+            }
+            LlmBackend::Claude => {
+                if let Some(pb) = bar { pb.set_message("extracting fields (Claude)..."); }
+                else if !json_mode { eprintln!("  → Claude extracting fields..."); }
+                claude::call_claude(&pages, config, schema, &doc_type)
+                    .await
+                    .with_context(|| format!("Claude extraction for {file_name}"))?
+            }
+            LlmBackend::Ollama => {
+                if let Some(pb) = bar { pb.set_message(format!("Ollama ({})...", config.resolved_ollama_model())); }
+                else if !json_mode { eprintln!("  → Ollama ({}) extracting...", config.resolved_ollama_model()); }
+                ollama::call_ollama(&pages, config, schema, &doc_type, log.as_ref())
+                    .await
+                    .with_context(|| format!("Ollama extraction failed for {file_name}"))?
+            }
+        };
+
+        // Pass 3: mandatory frontmatter review (enrichment). Ollama skipped.
+        let enrichment = match backend {
+            LlmBackend::Claude => {
+                if let Some(pb) = bar { pb.set_message("reviewing frontmatter..."); }
+                else if !json_mode { eprintln!("  → reviewing frontmatter (Claude)..."); }
+                match enrich::call_claude_enrich(&r.pages, &r.doc_type, config).await {
+                    Ok(e) => Some(e),
+                    Err(err) => {
+                        let msg = format!("    ⚠ frontmatter review skipped: {err:#}");
+                        if let Some(pb) = bar { pb.println(&msg); }
+                        else if !json_mode { eprintln!("{msg}"); }
+                        None
+                    }
+                }
+            }
+            LlmBackend::Gemini => {
+                if let Some(pb) = bar { pb.set_message("reviewing frontmatter (Gemini)..."); }
+                else if !json_mode { eprintln!("  → reviewing frontmatter (Gemini)..."); }
+                match enrich::call_gemini_enrich(&r.pages, &r.doc_type, config).await {
+                    Ok(e) => Some(e),
+                    Err(err) => {
+                        let msg = format!("    ⚠ frontmatter review skipped: {err:#}");
+                        if let Some(pb) = bar { pb.println(&msg); }
+                        else if !json_mode { eprintln!("{msg}"); }
+                        None
+                    }
+                }
+            }
+            LlmBackend::Ollama => None,
+        };
+        (r, enrichment)
     };
 
+    result.doc_category = doc_category.to_string();
     let ocr_method = result.ocr_method.clone();
-
-    // Pass 3: enrich with entities and key_info
-    let enrichment = match enrich_backend {
-        Some(LlmBackend::Claude) => {
-            if let Some(pb) = bar { pb.set_message("enriching..."); }
-            else if !json_mode { eprintln!("  → enriching document..."); }
-            match enrich::call_claude_enrich(&result.pages, &result.doc_type, config).await {
-                Ok(e) => Some(e),
-                Err(err) => {
-                    let msg = format!("    ⚠ enrichment skipped: {err:#}");
-                    if let Some(pb) = bar { pb.println(&msg); }
-                    else if !json_mode { eprintln!("{msg}"); }
-                    None
-                }
-            }
-        }
-        Some(LlmBackend::Gemini) => {
-            if let Some(pb) = bar { pb.set_message("enriching..."); }
-            else if !json_mode { eprintln!("  → enriching document..."); }
-            match enrich::call_gemini_enrich(&result.pages, &result.doc_type, config).await {
-                Ok(e) => Some(e),
-                Err(err) => {
-                    let msg = format!("    ⚠ enrichment skipped: {err:#}");
-                    if let Some(pb) = bar { pb.println(&msg); }
-                    else if !json_mode { eprintln!("{msg}"); }
-                    None
-                }
-            }
-        }
-        Some(LlmBackend::Ollama) | None => None,
-    };
 
     let md_content = frontmatter::generate_md(&result, path, &pages, schema, known_persons, enrichment.as_ref());
 
-    // Mirror subdirectory structure when scanning from a source root.
-    let output_path = if let Some(root) = source_root {
-        if let Ok(rel) = path.strip_prefix(root) {
-            let sub = rel.parent().unwrap_or(Path::new(""));
-            let out_dir = outputs_dir.join(sub);
-            std::fs::create_dir_all(&out_dir)
-                .with_context(|| format!("creating output subdir: {}", out_dir.display()))?;
-            out_dir.join(format!("{stem}.md"))
-        } else {
-            outputs_dir.join(format!("{stem}.md"))
-        }
-    } else {
-        outputs_dir.join(format!("{stem}.md"))
-    };
+    // All outputs nest under doc_category subdir (text/ or images/) within the
+    // source-root + model output directory. Source subdirectory structure is not mirrored.
+    let category_folder = if doc_category == "image" { "images" } else { "text" };
+    let category_dir = outputs_dir.join(category_folder);
+    std::fs::create_dir_all(&category_dir)
+        .with_context(|| format!("creating category dir: {}", category_dir.display()))?;
+    let output_path = category_dir.join(format!("{stem}.md"));
 
     std::fs::write(&output_path, &md_content)
         .with_context(|| format!("writing {}", output_path.display()))?;
 
-    Ok((output_path, ocr_method))
+        Ok((output_path, ocr_method))
+    }
 }
