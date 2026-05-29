@@ -596,6 +596,7 @@ fn parse_extraction_input(
         fields,
         // Populated by call_claude after the agentic loop finishes.
         ocr_method: String::new(),
+        extraction_mode: String::new(),
     })
 }
 

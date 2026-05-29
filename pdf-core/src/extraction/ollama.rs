@@ -282,6 +282,7 @@ fn parse_extraction_input(
         doc_category: String::new(), // set by extract_one after pipeline routing
         fields,
         ocr_method: String::new(), // set by call_ollama after the loop
+        extraction_mode: String::new(),
     })
 }
 
@@ -647,9 +648,29 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
 
+    fn test_schema() -> SchemaRegistry {
+        SchemaRegistry::from_toml_str(r#"
+[doc_type]
+values  = ["receipt","invoice","unknown"]
+default = "unknown"
+
+[[fields]]
+name       = "date"
+type       = "date"
+required   = false
+searchable = true
+
+[[fields]]
+name       = "person"
+type       = "person"
+required   = false
+searchable = true
+"#).expect("test schema should parse")
+    }
+
     #[test]
     fn build_tools_has_openai_wrapper() {
-        let schema = SchemaRegistry::default_schema();
+        let schema = test_schema();
         // include_ocr_scan=true: both tools present
         let tools = build_ollama_tools(&schema, &schema.doc_type_default, true);
         let tools_arr = tools.as_array().unwrap();
@@ -676,7 +697,7 @@ mod tests {
 
     #[test]
     fn build_tools_omits_ocr_scan_when_all_preocrd() {
-        let schema = SchemaRegistry::default_schema();
+        let schema = test_schema();
         // include_ocr_scan=false: only submit_extraction
         let tools = build_ollama_tools(&schema, &schema.doc_type_default, false);
         let tools_arr = tools.as_array().unwrap();
@@ -834,7 +855,7 @@ mod tests {
 
     #[test]
     fn parse_extraction_input_maps_pages_and_fields() {
-        let schema = SchemaRegistry::default_schema();
+        let schema = test_schema();
         let doc_type = schema.doc_type_default.clone();
         let input = json!({
             "pages": [{"page_num": 1, "text": "Sample text"}]
@@ -851,7 +872,7 @@ mod tests {
     fn parse_extraction_input_returns_empty_pages_when_missing() {
         // Smaller local models sometimes omit the pages array; we treat it as empty
         // rather than an error so the caller can patch in fallback OCR text.
-        let schema = SchemaRegistry::default_schema();
+        let schema = test_schema();
         let input = json!({"some_field": "value"});
         let result = parse_extraction_input(&input, &schema.doc_type_default, &schema).unwrap();
         assert!(result.pages.is_empty());
@@ -863,7 +884,7 @@ mod tests {
         // Uses a text-only page — no Tesseract required, no image upload.
         // Verifies the loop terminates and submit_extraction is called.
         let config = crate::config::ClaudeConfig::default();
-        let schema = SchemaRegistry::default_schema();
+        let schema = test_schema();
         let doc_type = schema.doc_type_default.clone();
 
         let pages = vec![PageContent::Text {

@@ -43,6 +43,7 @@ pub struct PageText {
 /// extractable text layers (text) or required rendering/vision (image).
 /// `fields` contains all document metadata fields, keyed by field name.
 /// `ocr_method` is set by the extraction backend after the loop.
+/// `extraction_mode` is "offline" or "online"; set by the CLI after the pipeline runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractionResult {
     pub pages: Vec<PageText>,
@@ -50,4 +51,5 @@ pub struct ExtractionResult {
     pub doc_category: String,
     pub fields: HashMap<String, String>,
     pub ocr_method: String,
+    pub extraction_mode: String, // "offline" | "online"; set by CLI after pipeline runs
 }

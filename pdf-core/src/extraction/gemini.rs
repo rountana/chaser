@@ -619,6 +619,7 @@ fn parse_extraction_input(
         doc_category: String::new(), // set by extract_one after pipeline routing
         fields,
         ocr_method: String::new(),
+        extraction_mode: String::new(),
     })
 }
 
