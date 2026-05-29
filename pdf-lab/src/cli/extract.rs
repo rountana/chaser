@@ -455,7 +455,7 @@ async fn run_online(args: ExtractOnlineArgs) -> anyhow::Result<()> {
     };
 
     let md_files: Vec<PathBuf> = if args.all {
-        collect_offline_md_files(&offline_base)
+        collect_offline_md_files(&offline_base, &online_base)
     } else {
         if args.paths.is_empty() {
             anyhow::bail!(
@@ -585,19 +585,27 @@ fn find_offline_md(offline_base: &Path, source_path: &Path) -> anyhow::Result<Pa
     )
 }
 
-fn collect_offline_md_files(offline_base: &Path) -> Vec<PathBuf> {
+fn collect_offline_md_files(offline_base: &Path, online_base: &Path) -> Vec<PathBuf> {
     let mut result = Vec::new();
     for sub in &["text", "images"] {
-        let dir = offline_base.join(sub);
-        if !dir.exists() {
+        let offline_dir = offline_base.join(sub);
+        let online_dir  = online_base.join(sub);
+        if !offline_dir.exists() {
             continue;
         }
-        if let Ok(entries) = std::fs::read_dir(&dir) {
+        if let Ok(entries) = std::fs::read_dir(&offline_dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if p.extension().and_then(|e| e.to_str()) == Some("md") {
-                    result.push(p);
+                if p.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
                 }
+                // Skip if online version already exists
+                if let Some(name) = p.file_name() {
+                    if online_dir.join(name).exists() {
+                        continue;
+                    }
+                }
+                result.push(p);
             }
         }
     }
@@ -684,6 +692,13 @@ async fn enrich_online_file(
         let body = frontmatter::strip_frontmatter(&content);
         parse_page_body(body)
     };
+
+    if doc_category != "image" && source_file.is_empty() {
+        anyhow::bail!(
+            "text offline doc '{}' is missing source_file in frontmatter — cannot enrich",
+            md_path.display()
+        );
+    }
 
     let ctx = OnlineFileContext {
         stem: stem.to_string(),
