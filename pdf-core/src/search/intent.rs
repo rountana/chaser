@@ -330,6 +330,21 @@ fn extract_keywords(
         .collect()
 }
 
+fn build_ngram_candidates(tokens: &[&str]) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for n in 1..=3usize {
+        for window in tokens.windows(n) {
+            candidates.push(window.join(" "));
+        }
+    }
+    candidates
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    // fastembed BGE embeddings are unit-normalized, so dot product == cosine similarity
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +414,22 @@ mod tests {
         let idx = result.unwrap();
         assert_eq!(idx.doc_type_embeddings.len(), 3);
         assert_eq!(idx.threshold, 0.70);
+    }
+
+    #[test]
+    fn ngram_candidates_1_to_3() {
+        let tokens = vec!["show", "me", "old", "contracts"];
+        let candidates = build_ngram_candidates(&tokens);
+        // unigrams
+        assert!(candidates.contains(&"show".to_string()));
+        assert!(candidates.contains(&"contracts".to_string()));
+        // bigrams
+        assert!(candidates.contains(&"show me".to_string()));
+        assert!(candidates.contains(&"old contracts".to_string()));
+        // trigrams
+        assert!(candidates.contains(&"show me old".to_string()));
+        assert!(candidates.contains(&"me old contracts".to_string()));
+        // 4-gram excluded
+        assert!(!candidates.contains(&"show me old contracts".to_string()));
     }
 }
