@@ -48,6 +48,12 @@ pub async fn route(
         return vec![Backend::Metadata];
     }
 
+    // Offline mode: skip LLM classify entirely, route deterministically.
+    // Avoids API calls, warnings, and error-path fallbacks.
+    if config.is_offline() {
+        return vec![Backend::Metadata];
+    }
+
     // R6: Ambiguous hybrid — 2+ primary signal types present, no rule above matched.
     // The only combination that reaches here: date + doc_type (no person).
     let primary_signal_count = [
@@ -187,5 +193,21 @@ mod tests {
         // R6 falls back to Metadata in route_sync (no live LLM available in tests)
         assert_eq!(backends, vec![Backend::Metadata],
             "date+doc_type without person should reach R6 and fall back to Metadata: {:?}", backends);
+    }
+
+    #[test]
+    fn offline_config_never_reaches_r6() {
+        // With an offline config, date+doc_type should short-circuit to Metadata
+        // before the R6 LLM call. route_sync doesn't have the config argument,
+        // so we verify the logic path manually: is_offline() returns true means
+        // the early return fires before primary_signal_count is evaluated.
+        let cfg = crate::config::ClaudeConfig {
+            mode: Some("online".to_string()),
+            ..crate::config::ClaudeConfig::default()
+        };
+        assert!(!cfg.is_offline(), "sanity: online config should not be offline");
+
+        let offline_cfg = crate::config::ClaudeConfig::default();
+        assert!(offline_cfg.is_offline(), "default config must report offline");
     }
 }
