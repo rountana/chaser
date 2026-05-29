@@ -64,6 +64,8 @@ fn default_mode() -> String { "text".to_string() }
 struct SaveSettingsBody {
     outputs_dir: Option<String>,
     schema_path: Option<String>,
+    mode: Option<String>,
+    api_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -73,6 +75,7 @@ struct SettingsResponse {
     api_key_set: bool,
     model: String,
     schema_path: Option<String>,
+    mode: String,
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -104,8 +107,12 @@ async fn handle_search(
     };
     let person_field_names = schema.searchable_person_field_names();
     let date_field_names = schema.searchable_date_field_names();
+    // Build metadata index from the full offline/online roots so both text/ and images/
+    // subdirectories are indexed regardless of the current search mode.
+    let meta_offline = outputs_base.join("offline");
+    let meta_online  = outputs_base.join("online");
     let index = MetadataIndex::build_merged_with_fields(
-        &dirs.offline, &dirs.online, &person_field_names, &date_field_names,
+        &meta_offline, &meta_online, &person_field_names, &date_field_names,
     ).unwrap_or_else(|_| MetadataIndex { entries: Default::default(), known_persons: vec![] });
     let search_dir = if dirs.online.exists() { dirs.online.clone() } else { dirs.offline.clone() };
 
@@ -164,6 +171,7 @@ async fn handle_search(
             "pageNum": r.page_num,
             "backend": r.backend.to_string(),
             "score": r.score,
+            "extractionMode": if r.extraction_mode.is_empty() { "offline" } else { &r.extraction_mode },
             "meta": {
                 "person": r.meta.person,
                 "docType": r.meta.doc_type,
@@ -188,6 +196,7 @@ async fn handle_get_settings(State(state): State<AppState>) -> impl IntoResponse
         api_key_set: !state.config.api_key.is_empty(),
         model: state.config.model.clone(),
         schema_path,
+        mode: state.config.mode.clone().unwrap_or_else(|| "offline".to_string()),
     })
 }
 
@@ -209,6 +218,14 @@ async fn handle_save_settings(
                 *state.intent_index.write().await = new_index;
                 *state.doc_type_values.write().await = new_schema.doc_type_values;
             }
+        }
+    }
+    if let Some(m) = body.mode {
+        config.mode = Some(m);
+    }
+    if let Some(k) = body.api_key {
+        if !k.is_empty() {
+            config.api_key = k;
         }
     }
     let _ = config.save();
