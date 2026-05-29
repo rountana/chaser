@@ -120,4 +120,102 @@ impl MetadataIndex {
 
         Ok(Self { entries, known_persons })
     }
+
+    /// Build index from merged offline + online trees.
+    /// For each file stem, the online version wins over offline.
+    pub fn build_merged(
+        offline_dir: &Path,
+        online_dir: &Path,
+    ) -> anyhow::Result<Self> {
+        let mut merged = Self::build(offline_dir, &["person"], &["date"])
+            .unwrap_or_else(|_| Self { entries: Default::default(), known_persons: vec![] });
+
+        let online_index = Self::build(online_dir, &["person"], &["date"])
+            .unwrap_or_else(|_| Self { entries: Default::default(), known_persons: vec![] });
+
+        for (stem, meta) in online_index.entries {
+            merged.entries.insert(stem, meta);
+        }
+
+        let persons: std::collections::HashSet<String> = merged.entries.values()
+            .filter(|m| !m.person.is_empty())
+            .map(|m| m.person.clone())
+            .collect();
+        merged.known_persons = persons.into_iter().collect();
+        merged.known_persons.sort();
+
+        Ok(merged)
+    }
+
+    /// Build index from merged offline + online trees, using schema-specific field names.
+    pub fn build_merged_with_fields(
+        offline_dir: &Path,
+        online_dir: &Path,
+        person_field_names: &[&str],
+        date_field_names: &[&str],
+    ) -> anyhow::Result<Self> {
+        let mut merged = Self::build(offline_dir, person_field_names, date_field_names)
+            .unwrap_or_else(|_| Self { entries: Default::default(), known_persons: vec![] });
+
+        let online_index = Self::build(online_dir, person_field_names, date_field_names)
+            .unwrap_or_else(|_| Self { entries: Default::default(), known_persons: vec![] });
+
+        for (stem, meta) in online_index.entries {
+            merged.entries.insert(stem, meta);
+        }
+
+        let persons: std::collections::HashSet<String> = merged.entries.values()
+            .filter(|m| !m.person.is_empty())
+            .map(|m| m.person.clone())
+            .collect();
+        merged.known_persons = persons.into_iter().collect();
+        merged.known_persons.sort();
+
+        Ok(merged)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn write_md(dir: &std::path::Path, name: &str, person: &str, doc_type: &str) {
+        fs::create_dir_all(dir).unwrap();
+        let content = format!(
+            "---\ntitle: test\ndoc_type: {doc_type}\ndoc_category: text\nperson: {person}\ndate: \"\"\ninstitution: \"\"\nsource_file: /tmp/test.pdf\npages: 1\nocr_method: text-embedded\nextraction_mode: offline\nelapsed_ms: 100\nextracted_at: 2026-01-01T00:00:00Z\n---\n[Page 1]\nhello world\n"
+        );
+        fs::write(dir.join(name), content).unwrap();
+    }
+
+    #[test]
+    fn build_merged_prefers_online() {
+        let tmp = TempDir::new().unwrap();
+        let offline = tmp.path().join("offline/text");
+        let online  = tmp.path().join("online/text");
+
+        write_md(&offline, "doc_a.md", "Alice", "invoice");
+        write_md(&offline, "doc_b.md", "Bob",   "receipt");
+        write_md(&online,  "doc_a.md", "Alice Online", "invoice");
+
+        let index = MetadataIndex::build_merged(&offline, &online).unwrap();
+        // doc_a: online version should win
+        assert_eq!(index.entries["doc_a"].person, "Alice Online");
+        // doc_b: only offline, should still appear
+        assert_eq!(index.entries["doc_b"].person, "Bob");
+        assert_eq!(index.entries.len(), 2);
+    }
+
+    #[test]
+    fn build_merged_offline_only() {
+        let tmp = TempDir::new().unwrap();
+        let offline = tmp.path().join("offline/text");
+        let online  = tmp.path().join("online/text"); // does not exist
+
+        write_md(&offline, "doc_x.md", "Xavier", "agreement");
+
+        let index = MetadataIndex::build_merged(&offline, &online).unwrap();
+        assert_eq!(index.entries["doc_x"].person, "Xavier");
+    }
 }

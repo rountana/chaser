@@ -36,6 +36,25 @@ pub fn search_subdir(base: &Path, mode: &SearchMode) -> PathBuf {
     }
 }
 
+/// Holds the offline and online subdirectories for a given search mode.
+pub struct MergedDirs {
+    pub offline: PathBuf,
+    pub online: PathBuf,
+}
+
+/// Returns the offline + online directories for a search mode.
+/// Callers use `MetadataIndex::build_merged_with_fields` to get a merged index from both.
+pub fn merged_dirs(base: &Path, mode: &SearchMode) -> MergedDirs {
+    let sub = match mode {
+        SearchMode::Text   => "text",
+        SearchMode::Images => "images",
+    };
+    MergedDirs {
+        offline: base.join("offline").join(sub),
+        online:  base.join("online").join(sub),
+    }
+}
+
 pub mod classify;
 pub mod index;
 pub mod intent;
