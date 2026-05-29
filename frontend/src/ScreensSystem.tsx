@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import Icon from './icons'
+import { api } from './api'
 
 // ── Toggle ───────────────────────────────────────────────────────────────────
 
@@ -115,14 +116,14 @@ export function ScreenIndexing({ outputsDir, onFolderChange }: ScreenIndexingPro
 
       <h2>What should Chaser look at?</h2>
       <p className="lead">
-        Point Chaser at the folder containing your extracted <code>.md</code> files. Sub-folders are included automatically.
+        Point Chaser at your <code>outputs/</code> directory. It automatically merges <code>offline/</code> and <code>online/</code> subdirectories, preferring LLM-enriched files when both exist.
       </p>
 
       <FolderPicker
-        label="Source folder (.md output files)"
+        label="Outputs directory (parent of offline/ and online/)"
         value={outputsDir}
         onChange={onFolderChange}
-        hint="Chaser searches all .md files in this folder and its sub-folders recursively."
+        hint="Set this to the outputs/ parent directory. offline/ and online/ subdirectories are discovered automatically."
       />
 
       <div className="idx-grid" style={{ marginTop: 20 }}>
@@ -188,6 +189,7 @@ export function ScreenIndexing({ outputsDir, onFolderChange }: ScreenIndexingPro
 
 const SECTIONS = [
   { id: 'General',   icon: 'monitor' },
+  { id: 'Plan',      icon: 'sparkles' },
   { id: 'Indexing',  icon: 'layers' },
   { id: 'Search',    icon: 'search' },
   { id: 'Privacy',   icon: 'shield' },
@@ -195,14 +197,156 @@ const SECTIONS = [
   { id: 'About',     icon: 'info' },
 ] as const
 
+interface ScreenPlanProps {
+  mode: 'offline' | 'online'
+  onModeChange: (mode: 'offline' | 'online') => void
+}
+
+function ScreenPlan({ mode, onModeChange }: ScreenPlanProps) {
+  const [activating, setActivating] = useState(false)
+  const [apiKey, setApiKey] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  async function activateOnline() {
+    if (!apiKey.trim()) return
+    setSaving(true)
+    try {
+      await api.saveSettings({ mode: 'online', apiKey: apiKey.trim() })
+      onModeChange('online')
+      setActivating(false)
+      setApiKey('')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function switchToOffline() {
+    await api.saveSettings({ mode: 'offline' })
+    onModeChange('offline')
+    setActivating(false)
+    setApiKey('')
+  }
+
+  const isOnline = mode === 'online'
+
+  return (
+    <>
+      <h2>Plan</h2>
+      <p className="lead">Choose how pdf-lab processes your documents.</p>
+
+      <div className="set-block">
+        <h4>Active mode</h4>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+
+          {/* Offline card */}
+          <div
+            style={{
+              borderRadius: 8, padding: '14px 16px',
+              border: `2px solid ${isOnline ? '#1e293b' : '#22c55e'}`,
+              background: isOnline ? '#0d1117' : '#0f2a1a',
+              boxShadow: isOnline ? 'none' : '0 0 0 3px #22c55e22',
+              opacity: activating ? 0.6 : 1,
+              cursor: isOnline ? 'pointer' : 'default',
+              transition: 'all .15s',
+            }}
+            onClick={isOnline ? switchToOffline : undefined}
+          >
+            <div style={{ fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.8px', padding: '1px 8px', borderRadius: 3, display: 'inline-block', marginBottom: 8, background: isOnline ? '#1e293b' : '#14532d', color: isOnline ? '#64748b' : '#4ade80' }}>
+              {isOnline ? 'Switch back' : 'Active'}
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 800, color: '#4ade80', marginBottom: 2 }}>Offline</div>
+            <div style={{ fontSize: 11, color: '#16a34a', marginBottom: 10 }}>Free · no API key needed</div>
+            {(['pdfium + Tesseract OCR', 'BGE embedding search', 'Heuristic metadata', 'Zero LLM calls, ever'] as const).map(f => (
+              <div key={f} style={{ fontSize: 11, color: isOnline ? '#334155' : '#64748b', margin: '3px 0' }}>✓ {f}</div>
+            ))}
+          </div>
+
+          {/* Online card */}
+          <div
+            style={{
+              borderRadius: 8, padding: '14px 16px',
+              border: `2px solid ${isOnline ? '#6366f1' : activating ? '#6366f1' : '#1e293b'}`,
+              background: '#12101f',
+              boxShadow: isOnline ? '0 0 0 3px #6366f133' : activating ? '0 0 0 3px #6366f133' : 'none',
+              cursor: (!isOnline && !activating) ? 'pointer' : 'default',
+              transition: 'all .15s',
+            }}
+            onClick={(!isOnline && !activating) ? () => setActivating(true) : undefined}
+          >
+            <div style={{ fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.8px', padding: '1px 8px', borderRadius: 3, display: 'inline-block', marginBottom: 8, background: isOnline ? '#312e81' : '#1e1b4b', color: isOnline ? '#818cf8' : '#64748b' }}>
+              {isOnline ? 'Active' : activating ? 'Activating…' : 'Click to activate'}
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 800, color: '#818cf8', marginBottom: 2 }}>Online</div>
+            <div style={{ fontSize: 11, color: '#6366f1', marginBottom: 10 }}>Premium · Claude API key required</div>
+            {(['Everything in Offline', 'LLM-enriched extraction', 'Smart query routing', 'Structured field output'] as const).map(f => (
+              <div key={f} style={{ fontSize: 11, color: '#64748b', margin: '3px 0' }}>✓ {f}</div>
+            ))}
+
+            {/* Inline key zone — shown when activating */}
+            {activating && !isOnline && (
+              <div style={{ marginTop: 10, background: '#0d1117', border: '1px solid #4f46e5', borderRadius: 6, padding: '11px 12px' }}>
+                <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.8px', color: '#818cf8', marginBottom: 4 }}>Claude API key</div>
+                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>
+                  Get yours at console.anthropic.com. Stored locally in config.json.
+                </div>
+                <input
+                  style={{ width: '100%', boxSizing: 'border-box', background: '#1e293b', border: '1px solid #334155', borderRadius: 5, padding: '7px 10px', color: '#e2e8f0', fontFamily: 'monospace', fontSize: 11, outline: 'none', marginBottom: 8 }}
+                  placeholder="sk-ant-api03-…"
+                  value={apiKey}
+                  onChange={e => setApiKey(e.target.value)}
+                  autoFocus
+                />
+                <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                  <button className="btn ghost" onClick={() => { setActivating(false); setApiKey('') }}>Cancel</button>
+                  <button className="btn primary" onClick={activateOnline} disabled={saving || !apiKey.trim()}>
+                    {saving ? 'Saving…' : 'Activate Online'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* What runs where */}
+      <div className="set-block">
+        <h4>What runs where</h4>
+        {[
+          { op: 'extract offline', local: true,  blocked: false, desc: 'pdfium · Tesseract · heuristics — always local' },
+          { op: 'extract online',  local: false, blocked: !isOnline, desc: isOnline ? 'LLM enrichment via Claude API' : 'disabled in Offline mode' },
+          { op: 'search',          local: true,  blocked: false, desc: isOnline ? 'BGE local + LLM routing for complex queries' : 'BGE · index scan · no LLM calls' },
+        ].map(({ op, local, blocked, desc }) => (
+          <div key={op} className="row" style={{ alignItems: 'flex-start', paddingTop: 8, paddingBottom: 8 }}>
+            <div className="lbl">
+              <div className="nm mono" style={{ fontSize: 12 }}>{op}</div>
+              <div className="desc">{desc}</div>
+            </div>
+            <div className="ctl" style={{ flexShrink: 0 }}>
+              <span className="pill" style={{
+                fontSize: 11,
+                background: blocked ? 'var(--surface-2)' : local ? 'var(--surface-2)' : 'var(--accent-dim)',
+                color: blocked ? 'var(--danger, #ef4444)' : local ? 'var(--text-muted)' : 'var(--accent)',
+              }}>
+                {blocked ? 'blocked' : local ? 'local' : 'network'}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  )
+}
+
 interface ScreenSettingsProps {
   outputsDir: string
   onFolderChange: (dir: string) => void
   schemaPath: string
   onSchemaPathChange: (p: string) => void
+  mode: 'offline' | 'online'
+  onModeChange: (mode: 'offline' | 'online') => void
 }
 
-export function ScreenSettings({ outputsDir, onFolderChange, schemaPath, onSchemaPathChange }: ScreenSettingsProps) {
+export function ScreenSettings({ outputsDir, onFolderChange, schemaPath, onSchemaPathChange, mode, onModeChange }: ScreenSettingsProps) {
   const [active, setActive] = useState<string>('Indexing')
 
   return (
@@ -221,6 +365,7 @@ export function ScreenSettings({ outputsDir, onFolderChange, schemaPath, onSchem
       </aside>
 
       <div className="set-main">
+        {active === 'Plan'      && <ScreenPlan mode={mode} onModeChange={onModeChange} />}
         {active === 'Indexing'  && <SettingsIndexing outputsDir={outputsDir} onFolderChange={onFolderChange} schemaPath={schemaPath} onSchemaPathChange={onSchemaPathChange} />}
         {active === 'Search'    && <SettingsSearch />}
         {active === 'Privacy'   && <SettingsPrivacy />}
@@ -234,7 +379,6 @@ export function ScreenSettings({ outputsDir, onFolderChange, schemaPath, onSchem
 
 function SettingsIndexing({ outputsDir, onFolderChange, schemaPath, onSchemaPathChange }: { outputsDir: string; onFolderChange: (d: string) => void; schemaPath: string; onSchemaPathChange: (p: string) => void }) {
   const [auto, setAuto] = useState(true)
-  const [ocr, setOcr] = useState(true)
   const [archives, setArchives] = useState(false)
 
   return (
@@ -243,12 +387,12 @@ function SettingsIndexing({ outputsDir, onFolderChange, schemaPath, onSchemaPath
       <p className="lead">What we read, where embeddings live, and how often we re-scan.</p>
 
       <div className="set-block">
-        <h4>Source folder</h4>
+        <h4>Outputs folder</h4>
         <FolderPicker
-          label="Outputs directory (.md files)"
+          label="Outputs directory"
           value={outputsDir}
           onChange={onFolderChange}
-          hint="Chaser searches this folder and all sub-folders recursively for .md files."
+          hint="Set this to the parent outputs/ directory. Chaser automatically reads from offline/ and online/ subdirectories, preferring online/ when both exist for the same file."
         />
       </div>
 
@@ -263,27 +407,15 @@ function SettingsIndexing({ outputsDir, onFolderChange, schemaPath, onSchemaPath
       </div>
 
       <div className="set-block">
-        <h4>Watched folders</h4>
-        {[
-          { nm: '~/Documents', meta: '412 MB · 1,840 files', desc: 'Scanned 2 min ago' },
-          { nm: '~/Pictures',  meta: '8.4 GB · 12,304 files', desc: 'Scanned 2 min ago' },
-        ].map((f) => (
-          <div className="row" key={f.nm}>
-            <div className="lbl">
-              <div className="nm">{f.nm} <span className="muted" style={{ fontWeight: 400 }}>· {f.meta}</span></div>
-              <div className="desc">{f.desc}</div>
-            </div>
-            <div className="ctl">
-              <button className="btn ghost">Exclude</button>
-              <button className="btn ghost">Remove</button>
+        <h4>How results are merged</h4>
+        <div className="row" style={{ alignItems: 'flex-start', paddingTop: 10, paddingBottom: 10 }}>
+          <div className="lbl">
+            <div className="nm">online/ preferred, offline/ fallback</div>
+            <div className="desc">
+              For each document, the LLM-enriched version in <code>online/</code> is used when available.
+              Documents only in <code>offline/</code> are still fully searchable with heuristic metadata.
             </div>
           </div>
-        ))}
-        <div className="row">
-          <button className="btn subtle">
-            <Icon name="plus" size={13} />
-            Add folder
-          </button>
         </div>
       </div>
 
@@ -295,13 +427,6 @@ function SettingsIndexing({ outputsDir, onFolderChange, schemaPath, onSchemaPath
             <div className="desc">watch the filesystem and update the index in the background</div>
           </div>
           <div className="ctl"><Toggle on={auto} onClick={() => setAuto(!auto)} /></div>
-        </div>
-        <div className="row">
-          <div className="lbl">
-            <div className="nm">OCR scanned PDFs &amp; images</div>
-            <div className="desc">extracts text from receipts, screenshots, photos of whiteboards…</div>
-          </div>
-          <div className="ctl"><Toggle on={ocr} onClick={() => setOcr(!ocr)} /></div>
         </div>
         <div className="row">
           <div className="lbl">
@@ -353,17 +478,29 @@ function SettingsPrivacy() {
     <>
       <h2>Privacy</h2>
       <p className="lead">
-        Chaser runs entirely on this machine. No queries or files leave the device unless you turn something on below.
+        Offline extraction is fully air-gapped — no data leaves this machine. Online enrichment sends document text or images to the Claude API.
       </p>
       <div className="set-block">
-        <h4>Local-only mode</h4>
-        <div className="row">
-          <div className="lbl">
-            <div className="nm">Disable all network features</div>
-            <div className="desc">strict local — no telemetry, no model updates, no link previews</div>
+        <h4>Network usage by operation</h4>
+        {[
+          { op: 'extract offline', net: false, desc: 'pdfium + Tesseract only — nothing leaves this machine' },
+          { op: 'extract online (text doc)', net: true, desc: 'page text sent to Anthropic Claude API' },
+          { op: 'extract online (image doc)', net: true, desc: 'page images + text sent to Anthropic Claude API' },
+          { op: 'index', net: false, desc: 'local FTS5 + embeddings — no network' },
+          { op: 'search', net: false, desc: 'entirely local — no network' },
+        ].map(({ op, net, desc }) => (
+          <div className="row" key={op} style={{ alignItems: 'flex-start', paddingTop: 8, paddingBottom: 8 }}>
+            <div className="lbl">
+              <div className="nm mono" style={{ fontSize: 12 }}>{op}</div>
+              <div className="desc">{desc}</div>
+            </div>
+            <div className="ctl" style={{ flexShrink: 0 }}>
+              <span className={`pill${net ? ' accent' : ''}`} style={{ fontSize: 11 }}>
+                {net ? 'network' : 'local'}
+              </span>
+            </div>
           </div>
-          <div className="ctl"><Toggle on={true} onClick={() => {}} /></div>
-        </div>
+        ))}
       </div>
       <div className="set-block">
         <h4>Index data</h4>

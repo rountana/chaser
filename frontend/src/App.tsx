@@ -73,6 +73,7 @@ export default function App() {
   const [schemaPath, setSchemaPathState] = useState<string>(loadSchemaPath)
   const [fileCount, setFileCount] = useState<number | null>(null)
   const [searchMode, setSearchModeState] = useState<SearchMode>(loadSearchMode)
+  const [mode, setMode] = useState<'offline' | 'online'>('offline')
   function setSearchMode(m: SearchMode) {
     setSearchModeState(m)
     saveSearchMode(m)
@@ -96,6 +97,7 @@ export default function App() {
       .then(s => {
         if (s.outputsDir && !outputsDir) setOutputsDir(s.outputsDir)
         if (s.schemaPath && !schemaPath) setSchemaPathState(s.schemaPath)
+        setMode(s.mode ?? 'offline')
       })
       .catch(() => {})
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -171,6 +173,8 @@ export default function App() {
         onFolderChange={setOutputsDir}
         schemaPath={schemaPath}
         onSchemaPathChange={setSchemaPath}
+        mode={mode}
+        onModeChange={setMode}
       />
     )
   }
