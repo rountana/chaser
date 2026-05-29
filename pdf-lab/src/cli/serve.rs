@@ -16,7 +16,10 @@ use tower_http::cors::{Any, CorsLayer};
 use pdf_core::{
     config::ClaudeConfig,
     schema::SchemaRegistry,
-    search::{Backend, SearchResult, index::MetadataIndex, intent, keyword, merge, metadata, router, semantic, structural},
+    search::{
+        Backend, SearchMode, SearchResult,
+        index::MetadataIndex, intent, keyword, merge, metadata, router, search_subdir, semantic, structural,
+    },
 };
 
 #[derive(Args)]
@@ -44,11 +47,13 @@ struct SearchQuery {
     q: String,
     #[serde(default = "default_top")]
     top: usize,
-    /// Optional outputs_dir override from the UI (absolute path)
     outputs_dir: Option<String>,
+    #[serde(default = "default_mode")]
+    mode: String,
 }
 
 fn default_top() -> usize { 12 }
+fn default_mode() -> String { "text".to_string() }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,12 +79,17 @@ async fn handle_search(
 ) -> impl IntoResponse {
     let config = &state.config;
 
-    // UI may pass its own outputs_dir; otherwise use server default
-    let outputs_dir: PathBuf = params
+    let outputs_base: PathBuf = params
         .outputs_dir
         .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| state.outputs_dir.lock().unwrap().clone());
+
+    let mode: SearchMode = match params.mode.parse() {
+        Ok(m) => m,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid mode; expected \"text\" or \"images\""}))).into_response(),
+    };
+    let search_dir = search_subdir(&outputs_base, &mode);
 
     let schema = {
         let sp = state.schema_path.lock().unwrap().clone();
@@ -87,51 +97,59 @@ async fn handle_search(
     };
     let person_field_names = schema.searchable_person_field_names();
     let date_field_names = schema.searchable_date_field_names();
-    let index = match MetadataIndex::build(&outputs_dir, &person_field_names, &date_field_names) {
+    let index = match MetadataIndex::build(&search_dir, &person_field_names, &date_field_names) {
         Ok(idx) => idx,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     };
 
     let signals = intent::parse(&params.q, &index.known_persons, &schema.doc_type_values);
-    let backends = router::route(&signals, &params.q, config, &index.known_persons, &schema.doc_type_values).await;
-
     let candidate_limit = params.top * 2;
     let mut all_results: Vec<SearchResult> = Vec::new();
 
-    for backend in &backends {
-        let mut results = match backend {
-            Backend::Metadata => {
-                let mut r = metadata::search(&signals, &index);
-                r.truncate(candidate_limit);
-                r
+    match mode {
+        SearchMode::Images => {
+            let mut r = metadata::search(&signals, &index);
+            r.truncate(candidate_limit);
+            for result in &mut r {
+                result.snippet = images_snippet(&result.meta);
             }
-            Backend::Keyword => {
-                let scope = if backends.contains(&Backend::Metadata) {
-                    let stems = metadata::matching_stems(&signals, &index);
-                    if stems.is_empty() { None } else { Some(stems.into_iter().collect()) }
-                } else {
-                    None
+            all_results.append(&mut r);
+        }
+        SearchMode::Text => {
+            let backends = router::route(&signals, &params.q, config, &index.known_persons, &schema.doc_type_values).await;
+            for backend in &backends {
+                let mut results = match backend {
+                    Backend::Metadata => {
+                        let mut r = metadata::search(&signals, &index);
+                        r.truncate(candidate_limit);
+                        r
+                    }
+                    Backend::Keyword => {
+                        let scope = if backends.contains(&Backend::Metadata) {
+                            let stems = metadata::matching_stems(&signals, &index);
+                            if stems.is_empty() { None } else { Some(stems.into_iter().collect()) }
+                        } else {
+                            None
+                        };
+                        let mut r = keyword::search(&signals, &search_dir, scope.as_ref());
+                        r.truncate(candidate_limit);
+                        r
+                    }
+                    Backend::Structural => structural::search(&signals, &search_dir),
+                    Backend::Semantic => {
+                        let mut r = semantic::search(&params.q);
+                        r.truncate(candidate_limit);
+                        r
+                    }
                 };
-                let mut r = keyword::search(&signals, &outputs_dir, scope.as_ref());
-                r.truncate(candidate_limit);
-                r
+                all_results.append(&mut results);
             }
-            Backend::Structural => structural::search(&signals, &outputs_dir),
-            Backend::Semantic => {
-                let mut r = semantic::search(&params.q);
-                r.truncate(candidate_limit);
-                r
-            }
-        };
-        all_results.append(&mut results);
+        }
     }
 
     let combined = merge::merge(all_results, params.top);
 
     let json: Vec<serde_json::Value> = combined.iter().map(|r| {
-        // Only include source_path if the file actually exists on disk; stale index
-        // entries whose original PDF was moved/deleted would otherwise cause the
-        // preview panel to render a "file not found" error from the server.
         let source_path_str = r.source_path.as_ref()
             .filter(|p| p.exists())
             .map(|p| p.display().to_string());
@@ -153,6 +171,7 @@ async fn handle_search(
                 "person": r.meta.person,
                 "docType": r.meta.doc_type,
                 "date": r.meta.date,
+                "institution": r.meta.institution,
                 "pages": r.meta.pages,
                 "words": r.meta.words,
                 "keyword": r.meta.keyword,
@@ -223,32 +242,47 @@ async fn handle_file(Query(params): Query<FileQuery>) -> impl IntoResponse {
 }
 
 async fn handle_index_status(State(state): State<AppState>) -> impl IntoResponse {
-    let outputs_dir = state.outputs_dir.lock().unwrap().clone();
+    let outputs_base = state.outputs_dir.lock().unwrap().clone();
     let schema = {
         let sp = state.schema_path.lock().unwrap().clone();
         SchemaRegistry::load_auto(sp.as_deref())
     };
     let person_field_names = schema.searchable_person_field_names();
     let date_field_names = schema.searchable_date_field_names();
-    let (files_indexed, size_bytes) = match MetadataIndex::build(&outputs_dir, &person_field_names, &date_field_names) {
-        Ok(idx) => {
-            let count = idx.entries.len();
-            let size: u64 = idx.entries.values()
+
+    let mut files_indexed = 0usize;
+    let mut size_bytes = 0u64;
+    for subdir in ["text", "images"] {
+        let dir = outputs_base.join(subdir);
+        if let Ok(idx) = MetadataIndex::build(&dir, &person_field_names, &date_field_names) {
+            files_indexed += idx.entries.len();
+            size_bytes += idx.entries.values()
                 .filter_map(|e| std::fs::metadata(&e.file_path).ok())
                 .map(|m| m.len())
-                .sum();
-            (count, size)
+                .sum::<u64>();
         }
-        Err(_) => (0, 0),
-    };
+    }
+
     Json(json!({
         "filesIndexed": files_indexed,
         "totalFiles": files_indexed,
         "sizeBytes": size_bytes,
         "lastSyncedAt": null,
         "running": false,
-        "outputsDir": outputs_dir.display().to_string(),
+        "outputsDir": outputs_base.display().to_string(),
     }))
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn images_snippet(meta: &pdf_core::search::ResultMeta) -> String {
+    format!(
+        "person: {}\ndoc_type: {}\ndate: {}\ninstitution: {}",
+        meta.person.as_deref().unwrap_or(""),
+        meta.doc_type.as_deref().unwrap_or(""),
+        meta.date.as_deref().unwrap_or(""),
+        meta.institution.as_deref().unwrap_or(""),
+    )
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
