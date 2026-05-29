@@ -85,9 +85,11 @@ interface SearchBarProps {
   setQuery: (q: string) => void
   onSearch: (q: string) => void
   intent?: string
+  searchMode: 'text' | 'images'
+  setSearchMode: (m: 'text' | 'images') => void
 }
 
-function SearchBar({ query, setQuery, onSearch, intent = 'keyword' }: SearchBarProps) {
+function SearchBar({ query, setQuery, onSearch, intent = 'keyword', searchMode, setSearchMode }: SearchBarProps) {
   return (
     <div className="searchbar">
       <div className="input-wrap">
@@ -102,6 +104,28 @@ function SearchBar({ query, setQuery, onSearch, intent = 'keyword' }: SearchBarP
           <span className="dot" />
           <span>intent · {intent}</span>
         </span>
+      </div>
+      <div className="mode-toggle" role="group" aria-label="Search pool">
+        <label className={`mode-opt${searchMode === 'text' ? ' on' : ''}`}>
+          <input
+            type="radio"
+            name="searchMode"
+            value="text"
+            checked={searchMode === 'text'}
+            onChange={() => setSearchMode('text')}
+          />
+          Documents (PDFs)
+        </label>
+        <label className={`mode-opt${searchMode === 'images' ? ' on' : ''}`}>
+          <input
+            type="radio"
+            name="searchMode"
+            value="images"
+            checked={searchMode === 'images'}
+            onChange={() => setSearchMode('images')}
+          />
+          Images &amp; Scans
+        </label>
       </div>
     </div>
   )
@@ -336,12 +360,15 @@ interface ScreenResultsProps {
   withPreview?: boolean
   onSearch: (q: string) => void
   outputsDir: string
+  searchMode: 'text' | 'images'
+  setSearchMode: (m: 'text' | 'images') => void
 }
 
 export function ScreenResults({
   query, setQuery, selectedId, onSelect,
   layout, setLayout, showScores, setShowScores,
   withPreview = false, onSearch, outputsDir,
+  searchMode, setSearchMode,
 }: ScreenResultsProps) {
   const [results, setResults] = useState<UIResult[]>([])
   const [loading, setLoading] = useState(false)
@@ -353,7 +380,7 @@ export function ScreenResults({
     abortRef.current = new AbortController()
     setLoading(true)
     try {
-      const raw = await api.search(q, 12, outputsDir || undefined)
+      const raw = await api.search(q, 12, outputsDir || undefined, searchMode)
       setResults(raw.map((r, i) => toUIResult(r, i)))
     } catch {
       // Server not running — fall back to mock data
@@ -361,9 +388,9 @@ export function ScreenResults({
     } finally {
       setLoading(false)
     }
-  }, [outputsDir])
+  }, [outputsDir, searchMode])
 
-  useEffect(() => { void runSearch(query) }, [query, runSearch])
+  useEffect(() => { void runSearch(query) }, [query, runSearch, searchMode])
 
   const selected = results.find(r => r.id === selectedId) ?? results[0] ?? null
 
@@ -371,7 +398,8 @@ export function ScreenResults({
     <div className={`shell${withPreview ? ' has-preview' : ''}`}>
       <Sidebar />
       <div className="main">
-        <SearchBar query={query} setQuery={setQuery} onSearch={onSearch} />
+        <SearchBar query={query} setQuery={setQuery} onSearch={onSearch}
+          searchMode={searchMode} setSearchMode={setSearchMode} />
         <Crumbs
           layout={layout} setLayout={setLayout}
           showScores={showScores} setShowScores={setShowScores}

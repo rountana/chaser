@@ -16,6 +16,15 @@ const SCREENS: { id: ScreenId; n: string; label: string; icon: string }[] = [
 
 const LS_OUTPUTS_DIR = 'chaser.outputsDir'
 const LS_SCHEMA_PATH = 'chaser.schemaPath'
+const LS_SEARCH_MODE = 'chaser.searchMode'
+type SearchMode = 'text' | 'images'
+function loadSearchMode(): SearchMode {
+  const v = localStorage.getItem(LS_SEARCH_MODE)
+  return v === 'images' ? 'images' : 'text'
+}
+function saveSearchMode(m: SearchMode) {
+  localStorage.setItem(LS_SEARCH_MODE, m)
+}
 
 function loadOutputsDir(): string {
   return localStorage.getItem(LS_OUTPUTS_DIR) ?? ''
@@ -63,6 +72,11 @@ export default function App() {
   const [outputsDir, setOutputsDirState] = useState<string>(loadOutputsDir)
   const [schemaPath, setSchemaPathState] = useState<string>(loadSchemaPath)
   const [fileCount, setFileCount] = useState<number | null>(null)
+  const [searchMode, setSearchModeState] = useState<SearchMode>(loadSearchMode)
+  function setSearchMode(m: SearchMode) {
+    setSearchModeState(m)
+    saveSearchMode(m)
+  }
 
   function setOutputsDir(dir: string) {
     setOutputsDirState(dir)
@@ -126,6 +140,8 @@ export default function App() {
         showScores={showScores} setShowScores={setShowScores}
         onSearch={handleSearch}
         outputsDir={outputsDir}
+        searchMode={searchMode}
+        setSearchMode={setSearchMode}
       />
     )
   } else if (active === 'preview') {
@@ -137,6 +153,8 @@ export default function App() {
         showScores={showScores} setShowScores={setShowScores}
         withPreview onSearch={handleSearch}
         outputsDir={outputsDir}
+        searchMode={searchMode}
+        setSearchMode={setSearchMode}
       />
     )
   } else if (active === 'indexing') {

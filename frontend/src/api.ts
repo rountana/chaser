@@ -19,8 +19,8 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 export const api = {
-  search: (query: string, top = 12, outputsDir?: string) => {
-    const params = new URLSearchParams({ q: query, top: String(top) })
+  search: (query: string, top = 12, outputsDir?: string, mode: 'text' | 'images' = 'text') => {
+    const params = new URLSearchParams({ q: query, top: String(top), mode })
     if (outputsDir) params.set('outputs_dir', outputsDir)
     return get<RustSearchResult[]>(`/search?${params}`)
   },
