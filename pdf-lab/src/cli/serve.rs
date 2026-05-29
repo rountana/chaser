@@ -20,7 +20,7 @@ use pdf_core::{
         Backend, SearchMode, SearchResult,
         index::MetadataIndex,
         intent::IntentIndex,
-        merge, metadata, router, search_subdir, semantic, structural,
+        merge, merged_dirs, metadata, router, semantic, structural,
     },
 };
 
@@ -93,7 +93,7 @@ async fn handle_search(
         Ok(m) => m,
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid mode; expected \"text\" or \"images\""}))).into_response(),
     };
-    let search_dir = search_subdir(&outputs_base, &mode);
+    let dirs = merged_dirs(&outputs_base, &mode);
 
     let schema = {
         let sp = state.schema_path.lock().unwrap().clone();
@@ -104,10 +104,10 @@ async fn handle_search(
     };
     let person_field_names = schema.searchable_person_field_names();
     let date_field_names = schema.searchable_date_field_names();
-    let index = match MetadataIndex::build(&search_dir, &person_field_names, &date_field_names) {
-        Ok(idx) => idx,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
-    };
+    let index = MetadataIndex::build_merged_with_fields(
+        &dirs.offline, &dirs.online, &person_field_names, &date_field_names,
+    ).unwrap_or_else(|_| MetadataIndex { entries: Default::default(), known_persons: vec![] });
+    let search_dir = if dirs.online.exists() { dirs.online.clone() } else { dirs.offline.clone() };
 
     let signals = state.intent_index.read().await.parse(&params.q, &index.known_persons);
     let candidate_limit = params.top * 2;
@@ -259,14 +259,15 @@ async fn handle_index_status(State(state): State<AppState>) -> impl IntoResponse
     let mut files_indexed = 0usize;
     let mut size_bytes = 0u64;
     for mode in [SearchMode::Text, SearchMode::Images] {
-        let dir = search_subdir(&outputs_base, &mode);
-        if let Ok(idx) = MetadataIndex::build(&dir, &person_field_names, &date_field_names) {
-            files_indexed += idx.entries.len();
-            size_bytes += idx.entries.values()
-                .filter_map(|e| std::fs::metadata(&e.file_path).ok())
-                .map(|m| m.len())
-                .sum::<u64>();
-        }
+        let dirs = merged_dirs(&outputs_base, &mode);
+        let idx = MetadataIndex::build_merged_with_fields(
+            &dirs.offline, &dirs.online, &person_field_names, &date_field_names,
+        ).unwrap_or_else(|_| MetadataIndex { entries: Default::default(), known_persons: vec![] });
+        files_indexed += idx.entries.len();
+        size_bytes += idx.entries.values()
+            .filter_map(|e| std::fs::metadata(&e.file_path).ok())
+            .map(|m| m.len())
+            .sum::<u64>();
     }
 
     Json(json!({

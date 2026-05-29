@@ -10,7 +10,7 @@ use pdf_core::{
         Backend, SearchMode, SearchResult,
         index::MetadataIndex,
         intent::IntentIndex,
-        merge, metadata, router, search_subdir, semantic, structural,
+        merge, merged_dirs, metadata, router, semantic, structural,
     },
 };
 
@@ -37,7 +37,7 @@ pub async fn run(args: SearchArgs) -> anyhow::Result<()> {
     let outputs_base = config.resolve_outputs_dir(args.outputs_dir);
 
     let mode: SearchMode = args.mode.parse()?;
-    let search_dir = search_subdir(&outputs_base, &mode);
+    let dirs = merged_dirs(&outputs_base, &mode);
 
     let schema = match &config.schema_path {
         Some(p) => SchemaRegistry::load(std::path::Path::new(p))?,
@@ -46,7 +46,10 @@ pub async fn run(args: SearchArgs) -> anyhow::Result<()> {
     let intent_index = IntentIndex::new(&schema.doc_type_values)?;
     let person_field_names = schema.searchable_person_field_names();
     let date_field_names = schema.searchable_date_field_names();
-    let index = MetadataIndex::build(&search_dir, &person_field_names, &date_field_names)?;
+    let index = MetadataIndex::build_merged_with_fields(
+        &dirs.offline, &dirs.online, &person_field_names, &date_field_names,
+    )?;
+    let search_dir = if dirs.online.exists() { dirs.online.clone() } else { dirs.offline.clone() };
 
     let signals = intent_index.parse(&args.query, &index.known_persons);
 
