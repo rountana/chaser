@@ -46,6 +46,8 @@ pub struct ClaudeConfig {
     pub gemini_api_key: Option<String>,
     #[serde(default)]
     pub gemini_model: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 impl Default for ClaudeConfig {
@@ -62,6 +64,7 @@ impl Default for ClaudeConfig {
             schema_path: None,
             gemini_api_key: None,
             gemini_model: None,
+            mode: None,
         }
     }
 }
@@ -136,9 +139,13 @@ impl ClaudeConfig {
             .unwrap_or_else(|| PathBuf::from("outputs"))
     }
 
-    /// Resolved source directory: CLI flag > config/env > None
+    /// Resolved source directory: CLI flag > config/env > ./source-files (if it exists) > None
     pub fn resolve_source_dir(&self, flag: Option<PathBuf>) -> Option<PathBuf> {
         flag.or_else(|| self.source_dir.as_deref().map(PathBuf::from))
+            .or_else(|| {
+                let default = PathBuf::from("source-files");
+                if default.is_dir() { Some(default) } else { None }
+            })
     }
 
     pub fn api_base(&self) -> &str {
@@ -157,5 +164,41 @@ impl ClaudeConfig {
 
     pub fn resolved_gemini_model(&self) -> &str {
         self.gemini_model.as_deref().unwrap_or("gemini-2.0-flash")
+    }
+
+    /// Returns true when mode is "offline" or unset. Any config without a mode
+    /// field defaults to offline so existing installs are not broken.
+    pub fn is_offline(&self) -> bool {
+        self.mode.as_deref() != Some("online")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_offline_when_mode_absent() {
+        let c = ClaudeConfig::default();
+        assert!(c.is_offline());
+    }
+
+    #[test]
+    fn is_offline_when_mode_offline() {
+        let c = ClaudeConfig { mode: Some("offline".to_string()), ..ClaudeConfig::default() };
+        assert!(c.is_offline());
+    }
+
+    #[test]
+    fn is_online_when_mode_online() {
+        let c = ClaudeConfig { mode: Some("online".to_string()), ..ClaudeConfig::default() };
+        assert!(!c.is_offline());
+    }
+
+    #[test]
+    fn is_offline_when_mode_garbage() {
+        // Unknown values default to offline (safe side)
+        let c = ClaudeConfig { mode: Some("garbage".to_string()), ..ClaudeConfig::default() };
+        assert!(c.is_offline());
     }
 }
