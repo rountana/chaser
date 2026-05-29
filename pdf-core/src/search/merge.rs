@@ -7,7 +7,7 @@ use super::SearchResult;
 /// Steps:
 ///   1. Dedup by file_stem — keep the result from the highest-priority backend.
 ///   2. Sort: semantic results by score DESC, then non-semantic by backend priority.
-///      Within each backend group: Metadata sorted by date DESC, FTS5/Keyword by score DESC.
+///      Within each backend group: Metadata sorted by date DESC, others by score DESC.
 ///   3. Truncate to `top_n`.
 pub fn merge(mut all_results: Vec<SearchResult>, top_n: usize) -> Vec<SearchResult> {
     // Step 1 — Dedup by file_stem, keeping highest-priority backend's result
