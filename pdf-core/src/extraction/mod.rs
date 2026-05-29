@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod enrich;
 pub mod gemini;
+pub mod heuristic;
 pub mod ocr;
 pub mod ollama;
 pub mod pdfium;
