@@ -18,6 +18,7 @@ pub fn generate_md(
     schema: &SchemaRegistry,
     known_persons: &[String],
     enrichment: Option<&EnrichmentResult>,
+    elapsed_ms: u64,
 ) -> String {
     let stem = source_path
         .file_stem()
@@ -32,7 +33,7 @@ pub fn generate_md(
     for field in schema.effective_fields(doc_type) {
         let llm_val = result.fields.get(&field.name).map(|s| s.as_str()).unwrap_or("");
         let val = if llm_val.is_empty() {
-            apply_filename_fallback(field, stem, known_persons)
+            apply_filename_fallback(field, stem, known_persons, &schema.doc_type_values)
         } else {
             llm_val.to_string()
         };
@@ -90,6 +91,8 @@ pub fn generate_md(
     out.push_str(&format!("source_file: {}\n", source_abs.display()));
     out.push_str(&format!("pages: {page_count}\n"));
     out.push_str(&format!("ocr_method: {}\n", result.ocr_method));
+    out.push_str(&format!("extraction_mode: {}\n", result.extraction_mode));
+    out.push_str(&format!("elapsed_ms: {elapsed_ms}\n"));
     out.push_str(&format!("extracted_at: {extracted_at}\n"));
     out.push_str("---\n");
 
@@ -109,9 +112,12 @@ fn apply_filename_fallback(
     field: &crate::schema::FieldDef,
     stem: &str,
     known_persons: &[String],
+    doc_type_tokens: &[String],
 ) -> String {
     match &field.field_type {
-        FieldType::Person => filename::extract_person(stem, known_persons).unwrap_or_default(),
+        FieldType::Person => {
+            filename::extract_person(stem, known_persons, doc_type_tokens).unwrap_or_default()
+        }
         FieldType::Date => filename::extract_date(stem).unwrap_or_default(),
         _ => String::new(),
     }
@@ -185,5 +191,53 @@ pub fn strip_frontmatter(content: &str) -> &str {
         &rest[end + 5..]
     } else {
         content
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extraction::{ExtractionResult, PageContent, PageText};
+    use crate::schema::SchemaRegistry;
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    fn minimal_schema() -> SchemaRegistry {
+        SchemaRegistry::from_toml_str(r#"
+[doc_type]
+values = ["unknown"]
+default = "unknown"
+"#).unwrap()
+    }
+
+    fn dummy_result(extraction_mode: &str) -> ExtractionResult {
+        ExtractionResult {
+            pages: vec![PageText { page_num: 1, text: "hello".to_string() }],
+            doc_type: "unknown".to_string(),
+            doc_category: "text".to_string(),
+            fields: HashMap::new(),
+            ocr_method: "text-embedded".to_string(),
+            extraction_mode: extraction_mode.to_string(),
+        }
+    }
+
+    #[test]
+    fn generate_md_includes_extraction_mode_and_elapsed() {
+        let schema = minimal_schema();
+        let result = dummy_result("offline");
+        let pages = vec![PageContent::Text { page_num: 1, text: "hello".to_string() }];
+        let md = generate_md(&result, Path::new("test.pdf"), &pages, &schema, &[], None, 312);
+        assert!(md.contains("extraction_mode: offline"), "missing extraction_mode");
+        assert!(md.contains("elapsed_ms: 312"), "missing elapsed_ms");
+    }
+
+    #[test]
+    fn generate_md_online_mode() {
+        let schema = minimal_schema();
+        let result = dummy_result("online");
+        let pages = vec![PageContent::Text { page_num: 1, text: "hello".to_string() }];
+        let md = generate_md(&result, Path::new("test.pdf"), &pages, &schema, &[], None, 3104);
+        assert!(md.contains("extraction_mode: online"));
+        assert!(md.contains("elapsed_ms: 3104"));
     }
 }

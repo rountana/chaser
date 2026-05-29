@@ -24,6 +24,11 @@ struct FileReport {
     char_count: usize,
 }
 
+struct FailedReport {
+    file_name: String,
+    reason: String,
+}
+
 fn extraction_type_label(ocr_method: &str) -> &'static str {
     if ocr_method.starts_with("mixed:") {
         return "Mixed";
@@ -63,10 +68,10 @@ pub async fn run(args: ExtractArgs) -> anyhow::Result<()> {
     let outputs_dir = config.resolve_outputs_dir(args.outputs_dir);
     let source_dir = config.resolve_source_dir(args.source_dir.clone());
 
-    // Load schema (user's schema.toml or built-in default)
+    // Load schema — fails fast with a clear error if schema.toml is missing or invalid
     let mut schema = match &config.schema_path {
-        Some(p) => SchemaRegistry::load_or_default(std::path::Path::new(p)),
-        None => SchemaRegistry::load_default(),
+        Some(p) => SchemaRegistry::load(std::path::Path::new(p))?,
+        None => SchemaRegistry::load_default()?,
     };
 
     // Resolve paths: explicit args > scan source_dir > error
@@ -162,7 +167,7 @@ pub async fn run(args: ExtractArgs) -> anyhow::Result<()> {
     };
 
     let mut completed: Vec<FileReport> = Vec::new();
-    let mut error_count: usize = 0;
+    let mut failed: Vec<FailedReport> = Vec::new();
     let total_start = Instant::now();
 
     for path in &paths {
@@ -202,13 +207,14 @@ pub async fn run(args: ExtractArgs) -> anyhow::Result<()> {
             }
             Err(e) => {
                 let file_elapsed = file_start.elapsed();
+                let reason = format!("{e:#}");
                 if args.json {
-                    println!("{}", json!({"event":"error","file":file_name,"elapsed_ms":file_elapsed.as_millis(),"message":e.to_string()}));
+                    println!("{}", json!({"event":"error","file":file_name,"elapsed_ms":file_elapsed.as_millis(),"message":reason}));
                 } else if let Some(ref pb) = bar {
-                    pb.println(format!("  ✗ {file_name}  error: {e:#}  ({:.1}s)", file_elapsed.as_secs_f32()));
+                    pb.println(format!("  ✗ {file_name}  error: {reason}  ({:.1}s)", file_elapsed.as_secs_f32()));
                     pb.inc(1);
                 }
-                error_count += 1;
+                failed.push(FailedReport { file_name: file_name.to_string(), reason });
             }
         }
     }
@@ -222,12 +228,12 @@ pub async fn run(args: ExtractArgs) -> anyhow::Result<()> {
         LlmBackend::Claude => config.model.clone(),
         LlmBackend::Ollama => config.resolved_ollama_model().to_string(),
     };
-    print_report(&completed, error_count, args.json, total_start.elapsed(), &model_name);
+    print_report(&completed, &failed, args.json, total_start.elapsed(), &model_name);
 
     Ok(())
 }
 
-fn print_report(completed: &[FileReport], error_count: usize, json_mode: bool, elapsed: Duration, model_name: &str) {
+fn print_report(completed: &[FileReport], failed: &[FailedReport], json_mode: bool, elapsed: Duration, model_name: &str) {
     if json_mode {
         let entries: Vec<_> = completed.iter().map(|r| json!({
             "file": r.file_name,
@@ -236,16 +242,24 @@ fn print_report(completed: &[FileReport], error_count: usize, json_mode: bool, e
             "ocr_method": r.ocr_method,
             "chars_extracted": r.char_count,
         })).collect();
-        println!("{}", json!({"event":"report","model":model_name,"files":entries,"errors":error_count,"elapsed_ms":elapsed.as_millis()}));
+        let failed_entries: Vec<_> = failed.iter().map(|r| json!({
+            "file": r.file_name,
+            "reason": r.reason,
+        })).collect();
+        println!("{}", json!({"event":"report","model":model_name,"files":entries,"failed":failed_entries,"errors":failed.len(),"elapsed_ms":elapsed.as_millis()}));
         return;
     }
 
-    let total = completed.len() + error_count;
+    let total = completed.len() + failed.len();
     if total == 0 {
         return;
     }
 
-    let name_width = completed.iter().map(|r| r.file_name.len()).max().unwrap_or(8).max(8);
+    let name_width = completed.iter().map(|r| r.file_name.len())
+        .chain(failed.iter().map(|r| r.file_name.len()))
+        .max()
+        .unwrap_or(8)
+        .max(8);
     let bar = "─".repeat(name_width + 30);
 
     eprintln!();
@@ -259,8 +273,13 @@ fn print_report(completed: &[FileReport], error_count: usize, json_mode: bool, e
             r.file_name, label, r.char_count, name_width = name_width);
     }
 
-    if error_count > 0 {
-        eprintln!("  {} error{}", error_count, if error_count == 1 { "" } else { "s" });
+    for r in failed {
+        let reason = if r.reason.len() > 60 {
+            format!("{}…", &r.reason[..60])
+        } else {
+            r.reason.clone()
+        };
+        eprintln!("  {:<name_width$}  FAILED      {reason}", r.file_name, name_width = name_width);
     }
 
     eprintln!("{bar}");
@@ -275,6 +294,9 @@ fn print_report(completed: &[FileReport], error_count: usize, json_mode: bool, e
         .collect();
     if !summary.is_empty() {
         eprintln!("  Methods: {}", summary.join("   "));
+    }
+    if !failed.is_empty() {
+        eprintln!("  {} failure{}", failed.len(), if failed.len() == 1 { "" } else { "s" });
     }
     eprintln!("  Total time: {:.1}s", elapsed.as_secs_f32());
     eprintln!("{bar}");
@@ -599,7 +621,7 @@ impl FileContext {
     result.doc_category = doc_category.to_string();
     let ocr_method = result.ocr_method.clone();
 
-    let md_content = frontmatter::generate_md(&result, path, &pages, schema, known_persons, enrichment.as_ref());
+    let md_content = frontmatter::generate_md(&result, path, &pages, schema, known_persons, enrichment.as_ref(), 0);
 
     // All outputs nest under doc_category subdir (text/ or images/) within the
     // source-root + model output directory. Source subdirectory structure is not mirrored.

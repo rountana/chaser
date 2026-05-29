@@ -128,7 +128,7 @@ async fn do_extract(input: ExtractDocumentInput) -> anyhow::Result<String> {
         .map(|idx| idx.known_persons)
         .unwrap_or_default();
 
-    let md = frontmatter::generate_md(&result, path, &pages, &schema, &known_persons, None);
+    let md = frontmatter::generate_md(&result, path, &pages, &schema, &known_persons, None, 0);
 
     if !stem.is_empty() {
         let _ = std::fs::create_dir_all(outputs_dir);
