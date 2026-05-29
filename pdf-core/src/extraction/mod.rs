@@ -3,6 +3,7 @@ pub mod enrich;
 pub mod gemini;
 pub mod heuristic;
 pub mod ocr;
+pub mod offline;
 pub mod ollama;
 pub mod pdfium;
 pub mod suggest;
