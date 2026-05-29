@@ -28,11 +28,11 @@ impl std::fmt::Display for SearchMode {
 }
 
 /// Returns the subfolder to search for the given mode.
-/// `Text` → `base/text/`    `Images` → `base/image/`
+/// `Text` → `base/text/`    `Images` → `base/images/`
 pub fn search_subdir(base: &Path, mode: &SearchMode) -> PathBuf {
     match mode {
         SearchMode::Text   => base.join("text"),
-        SearchMode::Images => base.join("image"),
+        SearchMode::Images => base.join("images"),
     }
 }
 
@@ -102,7 +102,7 @@ pub struct SearchResult {
 }
 
 #[cfg(test)]
-mod mode_tests {
+mod tests {
     use super::*;
     use std::path::Path;
 
@@ -130,6 +130,6 @@ mod mode_tests {
     #[test]
     fn search_subdir_images() {
         let base = Path::new("/data/outputs");
-        assert_eq!(search_subdir(base, &SearchMode::Images), base.join("image"));
+        assert_eq!(search_subdir(base, &SearchMode::Images), base.join("images"));
     }
 }
