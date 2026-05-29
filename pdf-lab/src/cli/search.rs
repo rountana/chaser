@@ -8,10 +8,10 @@ use pdf_core::{
     config::ClaudeConfig,
     schema::SchemaRegistry,
     search::{
-        Backend, SearchResult,
+        Backend, SearchMode, SearchResult,
         index::MetadataIndex,
         intent,
-        keyword, merge, metadata, router, semantic, structural,
+        keyword, merge, metadata, router, search_subdir, semantic, structural,
     },
 };
 
@@ -28,11 +28,17 @@ pub struct SearchArgs {
 
     #[arg(long, help = "Emit JSON array to stdout")]
     pub json: bool,
+
+    #[arg(long, default_value = "text", help = "Search pool: text (all backends, outputs/text/) or images (metadata only, outputs/images/)")]
+    pub mode: String,
 }
 
 pub async fn run(args: SearchArgs) -> anyhow::Result<()> {
     let config = ClaudeConfig::load()?;
-    let outputs_dir = config.resolve_outputs_dir(args.outputs_dir);
+    let outputs_base = config.resolve_outputs_dir(args.outputs_dir);
+
+    let mode: SearchMode = args.mode.parse()?;
+    let search_dir = search_subdir(&outputs_base, &mode);
 
     let schema = match &config.schema_path {
         Some(p) => SchemaRegistry::load_or_default(std::path::Path::new(p)),
@@ -40,73 +46,72 @@ pub async fn run(args: SearchArgs) -> anyhow::Result<()> {
     };
     let person_field_names = schema.searchable_person_field_names();
     let date_field_names = schema.searchable_date_field_names();
-    let index = MetadataIndex::build(&outputs_dir, &person_field_names, &date_field_names)?;
+    let index = MetadataIndex::build(&search_dir, &person_field_names, &date_field_names)?;
 
-    // Parse query intent
     let signals = intent::parse(
         &args.query,
         &index.known_persons,
         &schema.doc_type_values,
     );
 
-    // Route to backends
-    let backends = router::route(
-        &signals,
-        &args.query,
-        &config,
-        &index.known_persons,
-        &schema.doc_type_values,
-    )
-    .await;
-
-    // Dispatch — collect N×2 candidates per backend before merge
     let candidate_limit = args.top * 2;
     let mut all_results: Vec<SearchResult> = Vec::new();
 
-    for backend in &backends {
-        let mut results = match backend {
-            Backend::Metadata => {
-                let mut r = metadata::search(&signals, &index);
-                r.truncate(candidate_limit);
-                r
+    match mode {
+        SearchMode::Images => {
+            let mut r = metadata::search(&signals, &index);
+            r.truncate(candidate_limit);
+            for result in &mut r {
+                result.snippet = images_snippet(&result.meta);
             }
+            all_results.append(&mut r);
+        }
+        SearchMode::Text => {
+            let backends = router::route(
+                &signals,
+                &args.query,
+                &config,
+                &index.known_persons,
+                &schema.doc_type_values,
+            )
+            .await;
 
-            Backend::Keyword => {
-                // 2-pass: if Metadata was also selected, scope keyword to metadata stems
-                let scope: Option<HashSet<String>> = if backends.contains(&Backend::Metadata) {
-                    let stems = metadata::matching_stems(&signals, &index);
-                    if stems.is_empty() {
-                        None // metadata matched nothing → fall back to full scan
-                    } else {
-                        Some(stems.into_iter().collect())
+            for backend in &backends {
+                let mut results = match backend {
+                    Backend::Metadata => {
+                        let mut r = metadata::search(&signals, &index);
+                        r.truncate(candidate_limit);
+                        r
                     }
-                } else {
-                    None
+                    Backend::Keyword => {
+                        let scope: Option<HashSet<String>> = if backends.contains(&Backend::Metadata) {
+                            let stems = metadata::matching_stems(&signals, &index);
+                            if stems.is_empty() {
+                                None
+                            } else {
+                                Some(stems.into_iter().collect())
+                            }
+                        } else {
+                            None
+                        };
+                        let mut r = keyword::search(&signals, &search_dir, scope.as_ref());
+                        r.truncate(candidate_limit);
+                        r
+                    }
+                    Backend::Structural => structural::search(&signals, &search_dir),
+                    Backend::Semantic => {
+                        let mut r = semantic::search(&args.query);
+                        r.truncate(candidate_limit);
+                        r
+                    }
                 };
-
-                let mut r = keyword::search(&signals, &outputs_dir, scope.as_ref());
-                r.truncate(candidate_limit);
-                r
+                all_results.append(&mut results);
             }
 
-            Backend::Structural => {
-                structural::search(&signals, &outputs_dir)
-                // Structural returns all matching files (no limit — threshold is explicit)
+            if all_results.is_empty() && backends.contains(&Backend::Semantic) {
+                eprintln!("hint: run pdf-lab index to enable full-text and semantic search");
             }
-
-            Backend::Semantic => {
-                let mut r = semantic::search(&args.query);
-                r.truncate(candidate_limit);
-                r
-            }
-        };
-
-        all_results.append(&mut results);
-    }
-
-    // If all backends returned empty and semantic was requested, hint the user
-    if all_results.is_empty() && backends.contains(&Backend::Semantic) {
-        eprintln!("hint: run pdf-lab index to enable full-text and semantic search");
+        }
     }
 
     let combined = merge::merge(all_results, args.top);
@@ -126,6 +131,7 @@ pub async fn run(args: SearchArgs) -> anyhow::Result<()> {
                         "person": r.meta.person,
                         "docType": r.meta.doc_type,
                         "date": r.meta.date,
+                        "institution": r.meta.institution,
                         "pages": r.meta.pages,
                         "words": r.meta.words,
                         "keyword": r.meta.keyword
@@ -145,6 +151,16 @@ pub async fn run(args: SearchArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn images_snippet(meta: &pdf_core::search::ResultMeta) -> String {
+    format!(
+        "person: {}\ndoc_type: {}\ndate: {}\ninstitution: {}",
+        meta.person.as_deref().unwrap_or(""),
+        meta.doc_type.as_deref().unwrap_or(""),
+        meta.date.as_deref().unwrap_or(""),
+        meta.institution.as_deref().unwrap_or(""),
+    )
 }
 
 fn print_result(result: &SearchResult) {
