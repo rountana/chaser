@@ -11,7 +11,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Extract(cli::extract::ExtractArgs),
+    Extract(cli::extract::ExtractCommand),
     Index(cli::index::IndexArgs),
     Search(cli::search::SearchArgs),
     Config(cli::config::ConfigArgs),
