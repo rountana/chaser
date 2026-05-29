@@ -10,6 +10,6 @@ pub struct IndexArgs {
 
 pub fn run(_args: IndexArgs) -> anyhow::Result<()> {
     println!("Semantic indexing is not yet available (Phase 4).");
-    println!("Run `pdf-lab search` to use metadata and keyword search on extracted documents.");
+    println!("Run `pdf-lab search` to use metadata search on extracted documents.");
     Ok(())
 }
