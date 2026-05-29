@@ -196,11 +196,8 @@ mod tests {
     }
 
     #[test]
-    fn offline_config_never_reaches_r6() {
-        // With an offline config, date+doc_type should short-circuit to Metadata
-        // before the R6 LLM call. route_sync doesn't have the config argument,
-        // so we verify the logic path manually: is_offline() returns true means
-        // the early return fires before primary_signal_count is evaluated.
+    fn config_is_offline_default() {
+        // Sanity-check the config helper: default config is offline, explicit "online" mode is not.
         let cfg = crate::config::ClaudeConfig {
             mode: Some("online".to_string()),
             ..crate::config::ClaudeConfig::default()
@@ -209,5 +206,30 @@ mod tests {
 
         let offline_cfg = crate::config::ClaudeConfig::default();
         assert!(offline_cfg.is_offline(), "default config must report offline");
+    }
+
+    #[tokio::test]
+    async fn route_offline_returns_metadata_without_llm() {
+        use crate::search::intent::IntentSignals;
+        // date + doc_type — this combination would normally trigger R6 (LLM call)
+        let signals = IntentSignals {
+            persons: vec![],
+            doc_types: vec!["invoice".to_string()],
+            dates: vec!["2023".to_string()],
+            structural: None,
+        };
+        let offline_cfg = crate::config::ClaudeConfig::default(); // mode=None → is_offline()==true
+        assert!(offline_cfg.is_offline());
+
+        let backends = super::route(
+            &signals,
+            "invoices from 2023",
+            &offline_cfg,
+            &[],
+            &["invoice".to_string()],
+        ).await;
+
+        assert_eq!(backends, vec![super::Backend::Metadata],
+            "offline mode must return Metadata without calling LLM, got: {:?}", backends);
     }
 }
