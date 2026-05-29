@@ -199,6 +199,7 @@ impl<'a> Sink for KeywordSink<'a> {
                 person: None,
                 doc_type: None,
                 date: None,
+                institution: None,
                 pages: None,
                 words: None,
                 keyword: Some(self.keyword.clone()),

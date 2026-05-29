@@ -1,3 +1,41 @@
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SearchMode {
+    #[default]
+    Text,
+    Images,
+}
+
+impl std::str::FromStr for SearchMode {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "text"   => Ok(Self::Text),
+            "images" => Ok(Self::Images),
+            other    => anyhow::bail!("unknown search mode {:?}; expected \"text\" or \"images\"", other),
+        }
+    }
+}
+
+impl std::fmt::Display for SearchMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text   => write!(f, "text"),
+            Self::Images => write!(f, "images"),
+        }
+    }
+}
+
+/// Returns the subfolder to search for the given mode.
+/// `Text` → `base/text/`    `Images` → `base/image/`
+pub fn search_subdir(base: &Path, mode: &SearchMode) -> PathBuf {
+    match mode {
+        SearchMode::Text   => base.join("text"),
+        SearchMode::Images => base.join("image"),
+    }
+}
+
 pub mod classify;
 pub mod index;
 pub mod intent;
@@ -7,8 +45,6 @@ pub mod metadata;
 pub mod router;
 pub mod semantic;
 pub mod structural;
-
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Backend {
@@ -46,6 +82,7 @@ pub struct ResultMeta {
     pub person: Option<String>,
     pub doc_type: Option<String>,
     pub date: Option<String>,
+    pub institution: Option<String>,
     pub pages: Option<u32>,
     pub words: Option<u32>,
     pub keyword: Option<String>,
@@ -62,4 +99,37 @@ pub struct SearchResult {
     pub meta: ResultMeta,
     /// Absolute path to the original source document (PDF, image, etc.) referenced by the .md index file.
     pub source_path: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn search_mode_from_str_text() {
+        assert_eq!("text".parse::<SearchMode>().unwrap(), SearchMode::Text);
+    }
+
+    #[test]
+    fn search_mode_from_str_images() {
+        assert_eq!("images".parse::<SearchMode>().unwrap(), SearchMode::Images);
+    }
+
+    #[test]
+    fn search_mode_from_str_invalid() {
+        assert!("pdf".parse::<SearchMode>().is_err());
+    }
+
+    #[test]
+    fn search_subdir_text() {
+        let base = Path::new("/data/outputs");
+        assert_eq!(search_subdir(base, &SearchMode::Text), base.join("text"));
+    }
+
+    #[test]
+    fn search_subdir_images() {
+        let base = Path::new("/data/outputs");
+        assert_eq!(search_subdir(base, &SearchMode::Images), base.join("image"));
+    }
 }

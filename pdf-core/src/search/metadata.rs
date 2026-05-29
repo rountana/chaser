@@ -63,6 +63,7 @@ pub fn search(signals: &IntentSignals, index: &MetadataIndex) -> Vec<SearchResul
                     person: if meta.person.is_empty() { None } else { Some(meta.person.clone()) },
                     doc_type: if meta.doc_type.is_empty() { None } else { Some(meta.doc_type.clone()) },
                     date: if meta.date.is_empty() { None } else { Some(meta.date.clone()) },
+                    institution: if meta.institution.is_empty() { None } else { Some(meta.institution.clone()) },
                     pages: if meta.pages > 0 { Some(meta.pages) } else { None },
                     words: None,
                     keyword: None,

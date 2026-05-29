@@ -83,6 +83,7 @@ pub fn search(signals: &IntentSignals, outputs_dir: &Path) -> Vec<SearchResult> 
                 person: None,
                 doc_type: None,
                 date: None,
+                institution: None,
                 pages,
                 words,
                 keyword: None,
