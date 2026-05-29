@@ -177,4 +177,15 @@ mod tests {
         let sig = signals(&["Alice"], &["invoice"], &["2024"], Some(struct_signal()));
         assert_eq!(route_sync(&sig), vec![Backend::Structural]);
     }
+
+    #[test]
+    fn r6_date_plus_doc_type_reaches_classify_fallback() {
+        // date + doc_type with no person — the only combination that falls through to R6.
+        // route_sync returns Metadata (the sentinel for the R6 fallback path in tests).
+        let sig = signals(&[], &["invoice"], &["2024"], None);
+        let backends = route_sync(&sig);
+        // R6 falls back to Metadata in route_sync (no live LLM available in tests)
+        assert_eq!(backends, vec![Backend::Metadata],
+            "date+doc_type without person should reach R6 and fall back to Metadata: {:?}", backends);
+    }
 }

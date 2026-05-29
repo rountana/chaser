@@ -40,8 +40,8 @@ struct AppState {
     config: Arc<ClaudeConfig>,
     outputs_dir: Arc<std::sync::Mutex<PathBuf>>,
     schema_path: Arc<std::sync::Mutex<Option<PathBuf>>>,
-    intent_index: Arc<IntentIndex>,
-    doc_type_values: Arc<Vec<String>>,
+    intent_index: Arc<tokio::sync::RwLock<IntentIndex>>,
+    doc_type_values: Arc<tokio::sync::RwLock<Vec<String>>>,
 }
 
 // ── Request / response types ─────────────────────────────────────────────────
@@ -109,7 +109,7 @@ async fn handle_search(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     };
 
-    let signals = state.intent_index.parse(&params.q, &index.known_persons);
+    let signals = state.intent_index.read().await.parse(&params.q, &index.known_persons);
     let candidate_limit = params.top * 2;
     let mut all_results: Vec<SearchResult> = Vec::new();
 
@@ -123,7 +123,8 @@ async fn handle_search(
             all_results.append(&mut r);
         }
         SearchMode::Text => {
-            let backends = router::route(&signals, &params.q, config, &index.known_persons, &state.doc_type_values).await;
+            let doc_type_values = state.doc_type_values.read().await;
+            let backends = router::route(&signals, &params.q, config, &index.known_persons, &doc_type_values).await;
             for backend in &backends {
                 let mut results = match backend {
                     Backend::Metadata => {
@@ -201,7 +202,14 @@ async fn handle_save_settings(
     }
     if let Some(sp) = body.schema_path {
         *state.schema_path.lock().unwrap() = Some(PathBuf::from(&sp));
-        config.schema_path = Some(sp);
+        config.schema_path = Some(sp.clone());
+        // Rebuild intent index when schema changes
+        if let Ok(new_schema) = SchemaRegistry::load_auto(Some(std::path::Path::new(&sp))) {
+            if let Ok(new_index) = IntentIndex::new(&new_schema.doc_type_values) {
+                *state.intent_index.write().await = new_index;
+                *state.doc_type_values.write().await = new_schema.doc_type_values;
+            }
+        }
     }
     let _ = config.save();
     StatusCode::NO_CONTENT
@@ -279,8 +287,12 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     let schema_path = config.schema_path.as_deref().map(PathBuf::from);
 
     let initial_schema = SchemaRegistry::load_auto(schema_path.as_deref())?;
-    let intent_index = Arc::new(IntentIndex::new(&initial_schema.doc_type_values)?);
-    let doc_type_values = Arc::new(initial_schema.doc_type_values.clone());
+    let intent_index = Arc::new(tokio::sync::RwLock::new(
+        IntentIndex::new(&initial_schema.doc_type_values)?
+    ));
+    let doc_type_values = Arc::new(tokio::sync::RwLock::new(
+        initial_schema.doc_type_values.clone()
+    ));
 
     let state = AppState {
         config: Arc::new(config),
