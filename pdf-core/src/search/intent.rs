@@ -176,7 +176,9 @@ impl IntentIndex {
             }
         }
 
-        let tokens: Vec<&str> = q.split_whitespace().collect();
+        let tokens: Vec<&str> = q.split_whitespace()
+            .filter(|t| t.len() >= MIN_KEYWORD_LEN && !STOPWORDS.contains(t))
+            .collect();
         if tokens.is_empty() {
             return vec![];
         }
@@ -189,7 +191,10 @@ impl IntentIndex {
         let candidate_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
         let embeddings = match self.model.embed(candidate_refs, None) {
             Ok(e) => e,
-            Err(_) => return vec![],
+            Err(e) => {
+                eprintln!("warning: IntentIndex embed failed: {e}");
+                return vec![];
+            }
         };
 
         let mut matched = Vec::new();
@@ -560,6 +565,31 @@ mod tests {
         let sig = idx.parse("xkcd foobar baz", &[]);
         assert!(sig.doc_types.is_empty(),
             "expected no doc_types for nonsense query, got {:?}", sig.doc_types);
+    }
+
+    #[test]
+    #[ignore]
+    fn id_query_known_gap_below_threshold() {
+        // BGESmallENV15: "id" vs aadhaar = 0.6818, vs pan = 0.6576 — both below 0.70.
+        // Generic identity-document queries don't bridge to specific doc types at this threshold.
+        // Kept as documentation; do not lower the threshold without re-evaluating false-positive risk.
+        let types = vec!["pan".to_string(), "aadhaar".to_string()];
+        let idx = IntentIndex::new(&types).unwrap();
+        let sig = idx.parse("ID document", &[]);
+        assert!(sig.doc_types.is_empty(),
+            "expected no doc_types for 'ID document' at threshold 0.70, got {:?}", sig.doc_types);
+    }
+
+    #[test]
+    #[ignore]
+    fn stopwords_do_not_produce_false_positives() {
+        // "document" scores 0.7063 against "receipt" without filtering — a false positive.
+        // Stopword pre-filtering prevents it.
+        let types = vec!["receipt".to_string(), "agreement".to_string()];
+        let idx = IntentIndex::new(&types).unwrap();
+        let sig = idx.parse("show me documents", &[]);
+        assert!(sig.doc_types.is_empty(),
+            "stopwords like 'document' must not produce false-positive doc_type matches, got {:?}", sig.doc_types);
     }
 
     #[test]
