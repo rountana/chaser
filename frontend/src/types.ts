@@ -7,6 +7,7 @@ export interface RustSearchResult {
   pageNum: number | null
   backend: 'metadata' | 'keyword' | 'structural' | 'semantic'
   score: number | null
+  extractionMode: 'offline' | 'online'
   meta: {
     person: string | null
     docType: string | null
@@ -30,6 +31,7 @@ export interface UIResult {
   // Extra fields from Rust (preserved for detail view)
   pageNum?: number | null
   backend?: string
+  extractionMode?: 'offline' | 'online'
   meta?: RustSearchResult['meta']
   sourcePath?: string | null
 }
@@ -70,6 +72,7 @@ export function toUIResult(r: RustSearchResult, idx: number): UIResult {
     why,
     pageNum: r.pageNum,
     backend: r.backend,
+    extractionMode: r.extractionMode,
     meta: r.meta,
     sourcePath: r.sourcePath,
   }
@@ -89,6 +92,7 @@ export interface IndexStatus {
 
 export interface AppSettings {
   outputsDir: string
-  apiKey: string
+  apiKeySet: boolean
   schemaPath: string | null
+  mode: 'offline' | 'online'
 }
