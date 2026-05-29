@@ -113,6 +113,99 @@ impl IntentIndex {
             threshold: 0.70,
         })
     }
+
+    pub fn parse(&self, query: &str, known_persons: &[String]) -> IntentSignals {
+        let q_lower = query.to_lowercase();
+
+        let persons = extract_persons(&q_lower, known_persons);
+        let dates = extract_dates(&q_lower);
+        let structural = extract_structural(&q_lower);
+
+        let doc_types = self.extract_doc_types_embedding(query, &persons, &dates, &structural);
+
+        IntentSignals { persons, doc_types, dates, structural, keywords: vec![] }
+    }
+
+    fn extract_doc_types_embedding(
+        &self,
+        query: &str,
+        persons: &[String],
+        dates: &[String],
+        structural: &Option<StructSignal>,
+    ) -> Vec<String> {
+        if self.doc_type_embeddings.is_empty() {
+            return vec![];
+        }
+
+        let mut q = query.to_lowercase();
+
+        // Strip possessives
+        q = q.replace("'s", "").replace('\u{2019}', "");
+
+        // Strip relative date phrases
+        q = RELATIVE_DATE_RE.replace_all(&q, " ").to_string();
+
+        // Strip structural phrases
+        if structural.is_some() {
+            for pat in &[&*STRUCT_GTE, &*STRUCT_GT, &*STRUCT_LTE, &*STRUCT_LT] {
+                q = pat.replace_all(&q, " ").to_string();
+            }
+        }
+
+        // Strip person tokens
+        for p in persons {
+            for token in p.split_whitespace() {
+                let escaped = regex::escape(&token.to_lowercase());
+                if let Ok(re) = Regex::new(&format!(r"\b{escaped}\b")) {
+                    q = re.replace_all(&q, " ").to_string();
+                }
+            }
+        }
+
+        // Strip date tokens
+        for date in dates {
+            let year = &date[..4.min(date.len())];
+            if let Ok(re) = Regex::new(&format!(r"\b{year}\b")) {
+                q = re.replace_all(&q, " ").to_string();
+            }
+        }
+        for (month_name, _) in MONTH_NAMES {
+            let escaped = regex::escape(month_name);
+            if let Ok(re) = Regex::new(&format!(r"\b{escaped}\b")) {
+                q = re.replace_all(&q, " ").to_string();
+            }
+        }
+
+        let tokens: Vec<&str> = q.split_whitespace().collect();
+        if tokens.is_empty() {
+            return vec![];
+        }
+
+        let candidates: Vec<String> = build_ngram_candidates(&tokens);
+        if candidates.is_empty() {
+            return vec![];
+        }
+
+        let candidate_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+        let embeddings = match self.model.embed(candidate_refs, None) {
+            Ok(e) => e,
+            Err(_) => return vec![],
+        };
+
+        let mut matched = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for cand_emb in &embeddings {
+            for (dt_label, dt_emb) in &self.doc_type_embeddings {
+                let score = cosine_similarity(cand_emb, dt_emb);
+                if score >= self.threshold && seen.insert(dt_label.clone()) {
+                    matched.push(dt_label.clone());
+                }
+            }
+        }
+
+        matched
+    }
 }
 
 /// Parse a raw query into structured intent signals.
@@ -414,6 +507,61 @@ mod tests {
         let idx = result.unwrap();
         assert_eq!(idx.doc_type_embeddings.len(), 3);
         assert_eq!(idx.threshold, 0.70);
+    }
+
+    #[test]
+    #[ignore]
+    fn invoice_matches_receipt() {
+        let types = vec!["receipt".to_string(), "agreement".to_string(), "pan".to_string()];
+        let idx = IntentIndex::new(&types).unwrap();
+        let sig = idx.parse("show me invoices", &[]);
+        assert!(sig.doc_types.contains(&"receipt".to_string()),
+            "expected receipt in doc_types, got {:?}", sig.doc_types);
+    }
+
+    #[test]
+    #[ignore]
+    fn contract_matches_agreement() {
+        let types = vec!["receipt".to_string(), "agreement".to_string(), "pan".to_string()];
+        let idx = IntentIndex::new(&types).unwrap();
+        let sig = idx.parse("find old contracts", &[]);
+        assert!(sig.doc_types.contains(&"agreement".to_string()),
+            "expected agreement in doc_types, got {:?}", sig.doc_types);
+    }
+
+    #[test]
+    #[ignore]
+    fn id_document_matches_pan_and_aadhaar() {
+        let types = vec!["receipt".to_string(), "pan".to_string(), "aadhaar".to_string()];
+        let idx = IntentIndex::new(&types).unwrap();
+        let sig = idx.parse("ID document", &[]);
+        assert!(
+            sig.doc_types.contains(&"pan".to_string()) || sig.doc_types.contains(&"aadhaar".to_string()),
+            "expected pan or aadhaar in doc_types, got {:?}", sig.doc_types
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn person_date_receipt_full_parse() {
+        let types = vec!["receipt".to_string()];
+        let persons = vec!["Hema".to_string()];
+        let idx = IntentIndex::new(&types).unwrap();
+        let sig = idx.parse("last year Hema's receipts", &persons);
+        assert!(sig.persons.contains(&"Hema".to_string()));
+        assert!(sig.doc_types.contains(&"receipt".to_string()));
+        assert_eq!(sig.dates.len(), 1);
+        assert_eq!(sig.dates[0].len(), 4); // YYYY
+    }
+
+    #[test]
+    #[ignore]
+    fn unrecognized_query_produces_no_doc_types() {
+        let types = vec!["receipt".to_string(), "agreement".to_string()];
+        let idx = IntentIndex::new(&types).unwrap();
+        let sig = idx.parse("xkcd foobar baz", &[]);
+        assert!(sig.doc_types.is_empty(),
+            "expected no doc_types for nonsense query, got {:?}", sig.doc_types);
     }
 
     #[test]
