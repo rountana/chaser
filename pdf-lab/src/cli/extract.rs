@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use clap::{Args, Subcommand};
@@ -333,6 +334,16 @@ fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn append_error_log(log_path: &Path, file_name: &str, reason: &str) {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
+        let _ = writeln!(f, "[{ts}]  {file_name}  —  {reason}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Offline subcommand
 // ---------------------------------------------------------------------------
@@ -428,6 +439,21 @@ async fn run_offline(args: ExtractOfflineArgs) -> anyhow::Result<()> {
             Err(e) => {
                 let elapsed_ms = file_start.elapsed().as_millis() as u64;
                 let reason = format!("{e:#}");
+
+                // Try to salvage raw page text so the extracted content isn't lost.
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+                if let Ok((_, _, body, _)) = offline::render_pages(path).await {
+                    if !body.is_empty() {
+                        let partial_dir = offline_base.join("text");
+                        if std::fs::create_dir_all(&partial_dir).is_ok() {
+                            let partial_path = partial_dir.join(format!("{stem}.md"));
+                            let content = format!("<!-- extraction error: {reason} -->\n\n{body}");
+                            std::fs::write(&partial_path, content).ok();
+                        }
+                    }
+                }
+
+                append_error_log(&offline_base.join("errors.log"), &file_name, &reason);
                 emit_error(args.json, &file_name, &reason, elapsed_ms, bar.as_ref());
                 failed.push(FailedReport { file_name, reason });
             }
@@ -445,6 +471,12 @@ async fn run_offline(args: ExtractOfflineArgs) -> anyhow::Result<()> {
 
 async fn run_online(args: ExtractOnlineArgs) -> anyhow::Result<()> {
     let config = ClaudeConfig::load()?;
+    if config.is_offline() {
+        anyhow::bail!(
+            "online extraction is disabled — pdf-lab is set to Offline mode.\n\
+             To enable online extraction, switch to Online mode in Settings → Plan."
+        );
+    }
     let outputs_base = config.resolve_outputs_dir(args.outputs_dir.clone());
     let offline_base = outputs_base.join("offline");
     let online_base = outputs_base.join("online");
