@@ -1,3 +1,4 @@
+use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -76,6 +77,41 @@ impl IntentSignals {
     /// The primary keyword (longest token) for grep/FTS5 matching.
     pub fn primary_keyword(&self) -> Option<&str> {
         self.keywords.iter().max_by_key(|k| k.len()).map(|s| s.as_str())
+    }
+}
+
+pub struct IntentIndex {
+    model: TextEmbedding,
+    pub doc_type_embeddings: Vec<(String, Vec<f32>)>,
+    pub threshold: f32,
+}
+
+impl IntentIndex {
+    pub fn new(doc_type_values: &[String]) -> anyhow::Result<Self> {
+        let model = TextEmbedding::try_new(
+            InitOptions::new(EmbeddingModel::BGESmallENV15)
+                .with_show_download_progress(true),
+        )?;
+
+        let labels: Vec<String> = doc_type_values
+            .iter()
+            .filter(|s| s.as_str() != "unknown")
+            .cloned()
+            .collect();
+
+        let raw: Vec<Vec<f32>> = if labels.is_empty() {
+            vec![]
+        } else {
+            model.embed(labels.iter().map(|s| s.as_str()).collect(), None)?
+        };
+
+        let doc_type_embeddings = labels.into_iter().zip(raw.into_iter()).collect();
+
+        Ok(Self {
+            model,
+            doc_type_embeddings,
+            threshold: 0.70,
+        })
     }
 }
 
@@ -352,5 +388,16 @@ mod tests {
         let signals = parse("tax returns this year", &[], &[]);
         assert_eq!(signals.dates.len(), 1);
         assert_eq!(signals.dates[0].len(), 4, "this year should be YYYY, got {}", signals.dates[0]);
+    }
+
+    #[test]
+    #[ignore] // downloads ~133 MB model on first run
+    fn intent_index_new_succeeds() {
+        let types = vec!["receipt".to_string(), "agreement".to_string(), "pan".to_string()];
+        let result = IntentIndex::new(&types);
+        assert!(result.is_ok(), "IntentIndex::new failed: {:?}", result.err());
+        let idx = result.unwrap();
+        assert_eq!(idx.doc_type_embeddings.len(), 3);
+        assert_eq!(idx.threshold, 0.70);
     }
 }
