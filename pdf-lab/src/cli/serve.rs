@@ -18,7 +18,9 @@ use pdf_core::{
     schema::SchemaRegistry,
     search::{
         Backend, SearchMode, SearchResult,
-        index::MetadataIndex, intent, keyword, merge, metadata, router, search_subdir, semantic, structural,
+        index::MetadataIndex,
+        intent::IntentIndex,
+        merge, metadata, router, search_subdir, semantic, structural,
     },
 };
 
@@ -38,6 +40,8 @@ struct AppState {
     config: Arc<ClaudeConfig>,
     outputs_dir: Arc<std::sync::Mutex<PathBuf>>,
     schema_path: Arc<std::sync::Mutex<Option<PathBuf>>>,
+    intent_index: Arc<IntentIndex>,
+    doc_type_values: Arc<Vec<String>>,
 }
 
 // ── Request / response types ─────────────────────────────────────────────────
@@ -93,7 +97,10 @@ async fn handle_search(
 
     let schema = {
         let sp = state.schema_path.lock().unwrap().clone();
-        SchemaRegistry::load_auto(sp.as_deref())
+        match SchemaRegistry::load_auto(sp.as_deref()) {
+            Ok(s) => s,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        }
     };
     let person_field_names = schema.searchable_person_field_names();
     let date_field_names = schema.searchable_date_field_names();
@@ -102,7 +109,7 @@ async fn handle_search(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     };
 
-    let signals = intent::parse(&params.q, &index.known_persons, &schema.doc_type_values);
+    let signals = state.intent_index.parse(&params.q, &index.known_persons);
     let candidate_limit = params.top * 2;
     let mut all_results: Vec<SearchResult> = Vec::new();
 
@@ -116,22 +123,11 @@ async fn handle_search(
             all_results.append(&mut r);
         }
         SearchMode::Text => {
-            let backends = router::route(&signals, &params.q, config, &index.known_persons, &schema.doc_type_values).await;
+            let backends = router::route(&signals, &params.q, config, &index.known_persons, &state.doc_type_values).await;
             for backend in &backends {
                 let mut results = match backend {
                     Backend::Metadata => {
                         let mut r = metadata::search(&signals, &index);
-                        r.truncate(candidate_limit);
-                        r
-                    }
-                    Backend::Keyword => {
-                        let scope = if backends.contains(&Backend::Metadata) {
-                            let stems = metadata::matching_stems(&signals, &index);
-                            if stems.is_empty() { None } else { Some(stems.into_iter().collect()) }
-                        } else {
-                            None
-                        };
-                        let mut r = keyword::search(&signals, &search_dir, scope.as_ref());
                         r.truncate(candidate_limit);
                         r
                     }
@@ -174,7 +170,6 @@ async fn handle_search(
                 "institution": r.meta.institution,
                 "pages": r.meta.pages,
                 "words": r.meta.words,
-                "keyword": r.meta.keyword,
             }
         })
     }).collect();
@@ -245,7 +240,10 @@ async fn handle_index_status(State(state): State<AppState>) -> impl IntoResponse
     let outputs_base = state.outputs_dir.lock().unwrap().clone();
     let schema = {
         let sp = state.schema_path.lock().unwrap().clone();
-        SchemaRegistry::load_auto(sp.as_deref())
+        match SchemaRegistry::load_auto(sp.as_deref()) {
+            Ok(s) => s,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        }
     };
     let person_field_names = schema.searchable_person_field_names();
     let date_field_names = schema.searchable_date_field_names();
@@ -270,7 +268,7 @@ async fn handle_index_status(State(state): State<AppState>) -> impl IntoResponse
         "lastSyncedAt": null,
         "running": false,
         "outputsDir": outputs_base.display().to_string(),
-    }))
+    })).into_response()
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -280,10 +278,16 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     let outputs_dir = config.resolve_outputs_dir(args.outputs_dir);
     let schema_path = config.schema_path.as_deref().map(PathBuf::from);
 
+    let initial_schema = SchemaRegistry::load_auto(schema_path.as_deref())?;
+    let intent_index = Arc::new(IntentIndex::new(&initial_schema.doc_type_values)?);
+    let doc_type_values = Arc::new(initial_schema.doc_type_values.clone());
+
     let state = AppState {
         config: Arc::new(config),
         outputs_dir: Arc::new(std::sync::Mutex::new(outputs_dir.clone())),
         schema_path: Arc::new(std::sync::Mutex::new(schema_path)),
+        intent_index,
+        doc_type_values,
     };
 
     let cors = CorsLayer::new()

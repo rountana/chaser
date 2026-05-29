@@ -81,7 +81,7 @@ impl PdfLabServer {
 
     #[tool(
         name = "classify_query",
-        description = "Classify which search backends should handle a query. Returns backends (metadata, keyword, structural, semantic) and reasoning. Use this for hybrid or ambiguous queries before dispatching to search."
+        description = "Classify which search backends should handle a query. Returns backends (metadata, structural, semantic) and reasoning. Use this for hybrid or ambiguous queries before dispatching to search."
     )]
     pub async fn classify_query(
         &self,
@@ -97,8 +97,8 @@ impl PdfLabServer {
 async fn do_extract(input: ExtractDocumentInput) -> anyhow::Result<String> {
     let config = ClaudeConfig::load()?;
     let schema = match &config.schema_path {
-        Some(p) => SchemaRegistry::load_or_default(std::path::Path::new(p)),
-        None => SchemaRegistry::load_default(),
+        Some(p) => SchemaRegistry::load(std::path::Path::new(p))?,
+        None => SchemaRegistry::load_default()?,
     };
 
     let path = std::path::Path::new(&input.file_path);
@@ -172,7 +172,6 @@ async fn do_classify_query(input: ClassifyQueryInput) -> anyhow::Result<String> 
         .iter()
         .map(|b| match b {
             pdf_core::search::Backend::Metadata => "metadata",
-            pdf_core::search::Backend::Keyword => "keyword",
             pdf_core::search::Backend::Structural => "structural",
             pdf_core::search::Backend::Semantic => "semantic",
         })

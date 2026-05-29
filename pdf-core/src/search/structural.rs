@@ -86,7 +86,6 @@ pub fn search(signals: &IntentSignals, outputs_dir: &Path) -> Vec<SearchResult> 
                 institution: None,
                 pages,
                 words,
-                keyword: None,
             },
             source_path,
         });

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 use clap::Args;
@@ -10,8 +9,8 @@ use pdf_core::{
     search::{
         Backend, SearchMode, SearchResult,
         index::MetadataIndex,
-        intent,
-        keyword, merge, metadata, router, search_subdir, semantic, structural,
+        intent::IntentIndex,
+        merge, metadata, router, search_subdir, semantic, structural,
     },
 };
 
@@ -41,18 +40,15 @@ pub async fn run(args: SearchArgs) -> anyhow::Result<()> {
     let search_dir = search_subdir(&outputs_base, &mode);
 
     let schema = match &config.schema_path {
-        Some(p) => SchemaRegistry::load_or_default(std::path::Path::new(p)),
-        None => SchemaRegistry::load_default(),
+        Some(p) => SchemaRegistry::load(std::path::Path::new(p))?,
+        None => SchemaRegistry::load_default()?,
     };
+    let intent_index = IntentIndex::new(&schema.doc_type_values)?;
     let person_field_names = schema.searchable_person_field_names();
     let date_field_names = schema.searchable_date_field_names();
     let index = MetadataIndex::build(&search_dir, &person_field_names, &date_field_names)?;
 
-    let signals = intent::parse(
-        &args.query,
-        &index.known_persons,
-        &schema.doc_type_values,
-    );
+    let signals = intent_index.parse(&args.query, &index.known_persons);
 
     let candidate_limit = args.top * 2;
     let mut all_results: Vec<SearchResult> = Vec::new();
@@ -83,21 +79,6 @@ pub async fn run(args: SearchArgs) -> anyhow::Result<()> {
                         r.truncate(candidate_limit);
                         r
                     }
-                    Backend::Keyword => {
-                        let scope: Option<HashSet<String>> = if backends.contains(&Backend::Metadata) {
-                            let stems = metadata::matching_stems(&signals, &index);
-                            if stems.is_empty() {
-                                None
-                            } else {
-                                Some(stems.into_iter().collect())
-                            }
-                        } else {
-                            None
-                        };
-                        let mut r = keyword::search(&signals, &search_dir, scope.as_ref());
-                        r.truncate(candidate_limit);
-                        r
-                    }
                     Backend::Structural => structural::search(&signals, &search_dir),
                     Backend::Semantic => {
                         let mut r = semantic::search(&args.query);
@@ -106,10 +87,6 @@ pub async fn run(args: SearchArgs) -> anyhow::Result<()> {
                     }
                 };
                 all_results.append(&mut results);
-            }
-
-            if all_results.is_empty() && backends.contains(&Backend::Semantic) {
-                eprintln!("hint: run pdf-lab index to enable full-text and semantic search");
             }
         }
     }
@@ -134,7 +111,6 @@ pub async fn run(args: SearchArgs) -> anyhow::Result<()> {
                         "institution": r.meta.institution,
                         "pages": r.meta.pages,
                         "words": r.meta.words,
-                        "keyword": r.meta.keyword
                     }
                 })
             })
@@ -166,11 +142,6 @@ fn print_result(result: &SearchResult) {
             let doc_type = result.meta.doc_type.as_deref().unwrap_or("—");
             let date = result.meta.date.as_deref().unwrap_or("—");
             println!("  Person: {person} | Type: {doc_type} | Date: {date}");
-        }
-        Backend::Keyword => {
-            if let Some(kw) = &result.meta.keyword {
-                println!("  Keyword: {kw}");
-            }
         }
         Backend::Structural => {
             let pages = result.meta.pages.map(|p| format!("{p} pages")).unwrap_or_default();

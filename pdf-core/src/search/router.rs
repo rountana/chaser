@@ -17,11 +17,11 @@ pub async fn route(
         return vec![Backend::Structural];
     }
 
-    // R2: Person + (date OR doc_type) → metadata + keyword (2-pass)
+    // R2: Person + (date OR doc_type) → metadata
     if !signals.persons.is_empty()
         && (!signals.dates.is_empty() || !signals.doc_types.is_empty())
     {
-        return vec![Backend::Metadata, Backend::Keyword];
+        return vec![Backend::Metadata];
     }
 
     // R3: Person only
@@ -32,12 +32,10 @@ pub async fn route(
         return vec![Backend::Metadata];
     }
 
-    // R4: Date only — keywords must also be absent; date+keyword falls to R7 so the keyword
-    // backend can apply date pre-filtering and exclude unrelated documents.
+    // R4: Date only
     if signals.persons.is_empty()
         && !signals.dates.is_empty()
         && signals.doc_types.is_empty()
-        && signals.keywords.is_empty()
     {
         return vec![Backend::Metadata];
     }
@@ -47,7 +45,7 @@ pub async fn route(
         && signals.dates.is_empty()
         && !signals.doc_types.is_empty()
     {
-        return vec![Backend::Metadata, Backend::Keyword];
+        return vec![Backend::Metadata];
     }
 
     // R6: Ambiguous hybrid — 2+ primary signal types present, no rule above matched.
@@ -65,14 +63,14 @@ pub async fn route(
         match classify::classify_backends(query, known_persons, doc_type_values, config).await {
             Ok(backends) => return backends,
             Err(e) => {
-                eprintln!("warning: LLM triage failed; falling back to keyword search: {e:#}");
-                return vec![Backend::Keyword];
+                eprintln!("warning: LLM triage failed; falling back to metadata search: {e:#}");
+                return vec![Backend::Metadata];
             }
         }
     }
 
-    // R7: Default — keyword search (semantic stub returns [] until Phase 4)
-    vec![Backend::Keyword]
+    // R7: Default — metadata search
+    vec![Backend::Metadata]
 }
 
 #[cfg(test)]
@@ -85,14 +83,12 @@ mod tests {
         doc_types: &[&str],
         dates: &[&str],
         structural: Option<StructSignal>,
-        keywords: &[&str],
     ) -> IntentSignals {
         IntentSignals {
             persons: persons.iter().map(|s| s.to_string()).collect(),
             doc_types: doc_types.iter().map(|s| s.to_string()).collect(),
             dates: dates.iter().map(|s| s.to_string()).collect(),
             structural,
-            keywords: keywords.iter().map(|s| s.to_string()).collect(),
         }
     }
 
@@ -107,16 +103,16 @@ mod tests {
             return vec![Backend::Structural];
         }
         if !sig.persons.is_empty() && (!sig.dates.is_empty() || !sig.doc_types.is_empty()) {
-            return vec![Backend::Metadata, Backend::Keyword];
+            return vec![Backend::Metadata];
         }
         if !sig.persons.is_empty() && sig.dates.is_empty() && sig.doc_types.is_empty() {
             return vec![Backend::Metadata];
         }
-        if sig.persons.is_empty() && !sig.dates.is_empty() && sig.doc_types.is_empty() && sig.keywords.is_empty() {
+        if sig.persons.is_empty() && !sig.dates.is_empty() && sig.doc_types.is_empty() {
             return vec![Backend::Metadata];
         }
         if sig.persons.is_empty() && sig.dates.is_empty() && !sig.doc_types.is_empty() {
-            return vec![Backend::Metadata, Backend::Keyword];
+            return vec![Backend::Metadata];
         }
         let primary_count = [
             !sig.persons.is_empty(),
@@ -128,68 +124,57 @@ mod tests {
         .count();
         if primary_count >= 2 {
             // R6 — would call LLM; return sentinel for test purposes
-            return vec![Backend::Keyword]; // fallback path
+            return vec![Backend::Metadata]; // fallback path
         }
-        vec![Backend::Keyword]
+        vec![Backend::Metadata]
     }
 
     #[test]
     fn r1_structural() {
-        let sig = signals(&[], &[], &[], Some(struct_signal()), &[]);
+        let sig = signals(&[], &[], &[], Some(struct_signal()));
         assert_eq!(route_sync(&sig), vec![Backend::Structural]);
     }
 
     #[test]
     fn r2_person_plus_date() {
-        let sig = signals(&["Alice"], &[], &["2024"], None, &[]);
-        assert_eq!(route_sync(&sig), vec![Backend::Metadata, Backend::Keyword]);
+        let sig = signals(&["Alice"], &[], &["2024"], None);
+        assert_eq!(route_sync(&sig), vec![Backend::Metadata]);
     }
 
     #[test]
     fn r2_person_plus_doc_type() {
-        let sig = signals(&["Alice"], &["invoice"], &[], None, &[]);
-        assert_eq!(route_sync(&sig), vec![Backend::Metadata, Backend::Keyword]);
+        let sig = signals(&["Alice"], &["invoice"], &[], None);
+        assert_eq!(route_sync(&sig), vec![Backend::Metadata]);
     }
 
     #[test]
     fn r3_person_only() {
-        let sig = signals(&["Alice"], &[], &[], None, &[]);
+        let sig = signals(&["Alice"], &[], &[], None);
         assert_eq!(route_sync(&sig), vec![Backend::Metadata]);
     }
 
     #[test]
     fn r4_date_only() {
-        let sig = signals(&[], &[], &["2024-01"], None, &[]);
+        let sig = signals(&[], &[], &["2024-01"], None);
         assert_eq!(route_sync(&sig), vec![Backend::Metadata]);
     }
 
     #[test]
-    fn r4_does_not_fire_with_keywords() {
-        // date + keyword must NOT go to metadata-only; falls to R7 (keyword with date pre-filter)
-        let sig = signals(&[], &[], &["2023"], None, &["invoices"]);
-        let backends = route_sync(&sig);
-        assert_ne!(backends, vec![Backend::Metadata],
-            "date+keyword query should not route to metadata-only; got {:?}", backends);
-        assert!(backends.contains(&Backend::Keyword),
-            "date+keyword query must include keyword backend; got {:?}", backends);
-    }
-
-    #[test]
     fn r5_doc_type_only() {
-        let sig = signals(&[], &["invoice"], &[], None, &[]);
-        assert_eq!(route_sync(&sig), vec![Backend::Metadata, Backend::Keyword]);
+        let sig = signals(&[], &["invoice"], &[], None);
+        assert_eq!(route_sync(&sig), vec![Backend::Metadata]);
     }
 
     #[test]
-    fn r7_default_keyword() {
-        let sig = signals(&[], &[], &[], None, &["salary"]);
-        assert_eq!(route_sync(&sig), vec![Backend::Keyword]);
+    fn r7_default_metadata() {
+        let sig = signals(&[], &[], &[], None);
+        assert_eq!(route_sync(&sig), vec![Backend::Metadata]);
     }
 
     #[test]
     fn r1_beats_all_other_signals() {
         // Even with persons + dates, structural takes priority
-        let sig = signals(&["Alice"], &["invoice"], &["2024"], Some(struct_signal()), &[]);
+        let sig = signals(&["Alice"], &["invoice"], &["2024"], Some(struct_signal()));
         assert_eq!(route_sync(&sig), vec![Backend::Structural]);
     }
 }

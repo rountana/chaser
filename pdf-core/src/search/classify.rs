@@ -5,7 +5,7 @@ use crate::config::{ClaudeConfig, LlmBackend};
 use super::Backend;
 
 /// Call the configured LLM backend with classify_backends tool to resolve ambiguous queries (router R6).
-/// Falls back to keyword search if the backend is Ollama or if the call fails.
+/// Falls back to metadata search if the backend is Ollama or if the call fails.
 pub async fn classify_backends(
     query: &str,
     known_persons: &[String],
@@ -13,12 +13,12 @@ pub async fn classify_backends(
     config: &ClaudeConfig,
 ) -> anyhow::Result<Vec<Backend>> {
     if config.backend == LlmBackend::Ollama {
-        anyhow::bail!("classify_backends not supported for ollama backend; falling back to keyword");
+        anyhow::bail!("classify_backends not supported for ollama backend; falling back to metadata");
     }
 
     if config.backend == LlmBackend::Gemini {
-        // Gemini does not support forced tool_choice; fall back to keyword routing.
-        anyhow::bail!("classify_backends not supported for gemini backend; falling back to keyword");
+        // Gemini does not support forced tool_choice; fall back to metadata routing.
+        anyhow::bail!("classify_backends not supported for gemini backend; falling back to metadata");
     }
 
     let client = reqwest::Client::new();
@@ -35,7 +35,7 @@ pub async fn classify_backends(
                     "type": "array",
                     "items": {
                         "type": "string",
-                        "enum": ["metadata", "keyword", "structural", "semantic"]
+                        "enum": ["metadata", "structural", "semantic"]
                     },
                     "minItems": 1
                 },
@@ -98,7 +98,6 @@ pub async fn classify_backends(
         .iter()
         .filter_map(|v| match v.as_str() {
             Some("metadata") => Some(Backend::Metadata),
-            Some("keyword") => Some(Backend::Keyword),
             Some("structural") => Some(Backend::Structural),
             Some("semantic") => Some(Backend::Semantic),
             _ => None,

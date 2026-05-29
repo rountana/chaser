@@ -66,7 +66,6 @@ pub fn search(signals: &IntentSignals, index: &MetadataIndex) -> Vec<SearchResul
                     institution: if meta.institution.is_empty() { None } else { Some(meta.institution.clone()) },
                     pages: if meta.pages > 0 { Some(meta.pages) } else { None },
                     words: None,
-                    keyword: None,
                 },
                 source_path: meta.source_file.clone(),
             }
@@ -74,16 +73,3 @@ pub fn search(signals: &IntentSignals, index: &MetadataIndex) -> Vec<SearchResul
         .collect()
 }
 
-/// Perform 2-pass scoped search: first get matching stems from metadata, then pass to keyword.
-/// Returns the set of file stems that match the metadata filters (used by keyword backend for scoping).
-pub fn matching_stems(signals: &IntentSignals, index: &MetadataIndex) -> Vec<String> {
-    search(signals, index)
-        .into_iter()
-        .filter_map(|r| {
-            r.file_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
-        })
-        .collect()
-}

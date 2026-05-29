@@ -69,15 +69,6 @@ pub struct IntentSignals {
     pub doc_types: Vec<String>,
     pub dates: Vec<String>,
     pub structural: Option<StructSignal>,
-    /// Remaining keyword tokens after stripping signals and stopwords.
-    pub keywords: Vec<String>,
-}
-
-impl IntentSignals {
-    /// The primary keyword (longest token) for grep/FTS5 matching.
-    pub fn primary_keyword(&self) -> Option<&str> {
-        self.keywords.iter().max_by_key(|k| k.len()).map(|s| s.as_str())
-    }
 }
 
 pub struct IntentIndex {
@@ -123,7 +114,7 @@ impl IntentIndex {
 
         let doc_types = self.extract_doc_types_embedding(query, &persons, &dates, &structural);
 
-        IntentSignals { persons, doc_types, dates, structural, keywords: vec![] }
+        IntentSignals { persons, doc_types, dates, structural }
     }
 
     fn extract_doc_types_embedding(
@@ -213,19 +204,6 @@ impl IntentIndex {
     }
 }
 
-/// Parse a raw query into structured intent signals.
-pub fn parse(query: &str, known_persons: &[String], doc_type_values: &[String]) -> IntentSignals {
-    let q_lower = query.to_lowercase();
-
-    let persons = extract_persons(&q_lower, known_persons);
-    let doc_types = extract_doc_types(&q_lower, doc_type_values);
-    let dates = extract_dates(&q_lower);
-    let structural = extract_structural(&q_lower);
-    let keywords = extract_keywords(query, &persons, &doc_types, &dates, &structural);
-
-    IntentSignals { persons, doc_types, dates, structural, keywords }
-}
-
 fn extract_persons(query_lower: &str, known_persons: &[String]) -> Vec<String> {
     let stripped = query_lower.replace("'s", "").replace('\u{2019}', "");
     let mut found = Vec::new();
@@ -233,24 +211,6 @@ fn extract_persons(query_lower: &str, known_persons: &[String]) -> Vec<String> {
         let p_lower = person.to_lowercase();
         if query_lower.contains(&p_lower) || stripped.contains(&p_lower) {
             found.push(person.clone());
-        }
-    }
-    found
-}
-
-fn extract_doc_types(query_lower: &str, doc_type_values: &[String]) -> Vec<String> {
-    let mut found = Vec::new();
-    for dt in doc_type_values {
-        if dt == "unknown" {
-            continue;
-        }
-        // Word-boundary match for singular and plural
-        let escaped = regex::escape(dt);
-        let pattern = format!(r"\b(?:{escaped}s?)\b");
-        if let Ok(re) = Regex::new(&pattern) {
-            if re.is_match(query_lower) {
-                found.push(dt.clone());
-            }
         }
     }
     found
@@ -362,72 +322,6 @@ fn parse_field(s: &str) -> StructField {
     if s.to_lowercase().starts_with("word") { StructField::Words } else { StructField::Pages }
 }
 
-fn extract_keywords(
-    query: &str,
-    persons: &[String],
-    doc_types: &[String],
-    dates: &[String],
-    structural: &Option<StructSignal>,
-) -> Vec<String> {
-    let mut q = query.to_lowercase();
-
-    // Strip possessives
-    q = q.replace("'s", "").replace('\u{2019}', "");
-
-    // Strip relative date phrases before structural/person/doc-type passes
-    q = RELATIVE_DATE_RE.replace_all(&q, " ").to_string();
-
-    // Strip structural phrases to avoid "pages", "words" etc. appearing as keywords
-    if structural.is_some() {
-        for pat in &[&*STRUCT_GTE, &*STRUCT_GT, &*STRUCT_LTE, &*STRUCT_LT] {
-            q = pat.replace_all(&q, " ").to_string();
-        }
-    }
-
-    // Strip known person tokens
-    for p in persons {
-        for token in p.split_whitespace() {
-            let escaped = regex::escape(&token.to_lowercase());
-            if let Ok(re) = Regex::new(&format!(r"\b{escaped}\b")) {
-                q = re.replace_all(&q, " ").to_string();
-            }
-        }
-    }
-
-    // Strip doc_type tokens (singular + plural)
-    for dt in doc_types {
-        let escaped = regex::escape(dt);
-        if let Ok(re) = Regex::new(&format!(r"\b{escaped}s?\b")) {
-            q = re.replace_all(&q, " ").to_string();
-        }
-    }
-
-    // Strip date tokens (years, month names)
-    for date in dates {
-        // Strip year portion
-        let year = &date[..4.min(date.len())];
-        if let Ok(re) = Regex::new(&format!(r"\b{year}\b")) {
-            q = re.replace_all(&q, " ").to_string();
-        }
-    }
-    for (month_name, _) in MONTH_NAMES {
-        let escaped = regex::escape(month_name);
-        if let Ok(re) = Regex::new(&format!(r"\b{escaped}\b")) {
-            q = re.replace_all(&q, " ").to_string();
-        }
-    }
-
-    // Tokenize, filter stopwords and short tokens, dedup
-    let mut seen = std::collections::HashSet::new();
-    q.split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .filter(|t| t.len() >= MIN_KEYWORD_LEN)
-        .filter(|t| !STOPWORDS.contains(t))
-        .filter(|t| seen.insert(t.to_string()))
-        .map(|t| t.to_string())
-        .collect()
-}
-
 fn build_ngram_candidates(tokens: &[&str]) -> Vec<String> {
     let mut candidates = Vec::new();
     for n in 1..=3usize {
@@ -448,59 +342,54 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore] // requires model
     fn person_signal_possessive() {
         let persons = vec!["Hema".to_string()];
-        let signals = parse("Hema's PAN", &persons, &["pan".to_string()]);
+        let types = vec!["pan".to_string()];
+        let idx = IntentIndex::new(&types).unwrap();
+        let signals = idx.parse("Hema's PAN", &persons);
         assert_eq!(signals.persons, vec!["Hema"]);
         assert_eq!(signals.doc_types, vec!["pan"]);
     }
 
     #[test]
     fn date_month_year() {
-        let signals = parse("receipts from October 2025", &[], &["receipt".to_string()]);
-        assert_eq!(signals.dates, vec!["2025-10"]);
+        let dates = extract_dates("receipts from october 2025");
+        assert_eq!(dates, vec!["2025-10"]);
     }
 
     #[test]
     fn structural_pages() {
-        let signals = parse("documents with more than 5 pages", &[], &[]);
-        assert!(signals.structural.is_some());
-        let s = signals.structural.unwrap();
+        let sig = extract_structural("documents with more than 5 pages");
+        assert!(sig.is_some());
+        let s = sig.unwrap();
         assert!(matches!(s.op, StructOp::Gt));
         assert_eq!(s.value, 5);
     }
 
     #[test]
-    fn keyword_extraction() {
-        let signals = parse("stamp duty", &[], &[]);
-        assert!(signals.keywords.contains(&"stamp".to_string()));
-        assert!(signals.keywords.contains(&"duty".to_string()));
-    }
-
-    #[test]
     fn relative_date_last_quarter() {
-        let signals = parse("invoices from last quarter", &[], &["invoice".to_string()]);
-        assert_eq!(signals.dates.len(), 3, "last quarter should produce 3 month prefixes");
-        for d in &signals.dates {
+        let (dates, matched) = extract_relative_dates("invoices from last quarter");
+        assert!(matched);
+        assert_eq!(dates.len(), 3);
+        for d in &dates {
             assert!(d.len() == 7 && d.contains('-'), "each date should be YYYY-MM, got {d}");
         }
-        assert!(!signals.keywords.iter().any(|k| k == "last" || k == "quarter"),
-            "relative date tokens must not leak into keywords: {:?}", signals.keywords);
     }
 
     #[test]
     fn relative_date_last_month() {
-        let signals = parse("show me documents from last month", &[], &[]);
-        assert_eq!(signals.dates.len(), 1);
-        assert_eq!(signals.dates[0].len(), 7, "should be YYYY-MM, got {}", signals.dates[0]);
-        assert!(!signals.keywords.iter().any(|k| k == "last" || k == "month"));
+        let (dates, matched) = extract_relative_dates("show me documents from last month");
+        assert!(matched);
+        assert_eq!(dates.len(), 1);
+        assert_eq!(dates[0].len(), 7);
     }
 
     #[test]
     fn relative_date_this_year() {
-        let signals = parse("tax returns this year", &[], &[]);
-        assert_eq!(signals.dates.len(), 1);
-        assert_eq!(signals.dates[0].len(), 4, "this year should be YYYY, got {}", signals.dates[0]);
+        let dates = extract_dates("tax returns this year");
+        assert_eq!(dates.len(), 1);
+        assert_eq!(dates[0].len(), 4);
     }
 
     #[test]

@@ -39,7 +39,6 @@ pub fn search_subdir(base: &Path, mode: &SearchMode) -> PathBuf {
 pub mod classify;
 pub mod index;
 pub mod intent;
-pub mod keyword;
 pub mod merge;
 pub mod metadata;
 pub mod router;
@@ -49,7 +48,6 @@ pub mod structural;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Backend {
     Metadata,
-    Keyword,
     Structural,
     Semantic,
 }
@@ -58,7 +56,6 @@ impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Backend::Metadata => write!(f, "metadata"),
-            Backend::Keyword => write!(f, "keyword"),
             Backend::Structural => write!(f, "structural"),
             Backend::Semantic => write!(f, "semantic"),
         }
@@ -71,8 +68,7 @@ impl Backend {
         match self {
             Backend::Semantic => 0,
             Backend::Metadata => 1,
-            Backend::Keyword => 2,
-            Backend::Structural => 3,
+            Backend::Structural => 2,
         }
     }
 }
@@ -85,7 +81,6 @@ pub struct ResultMeta {
     pub institution: Option<String>,
     pub pages: Option<u32>,
     pub words: Option<u32>,
-    pub keyword: Option<String>,
 }
 
 #[derive(Debug, Clone)]
