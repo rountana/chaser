@@ -111,7 +111,7 @@ async fn handle_search(
             let mut r = metadata::search(&signals, &index);
             r.truncate(candidate_limit);
             for result in &mut r {
-                result.snippet = images_snippet(&result.meta);
+                result.snippet = super::images_snippet(&result.meta);
             }
             all_results.append(&mut r);
         }
@@ -252,8 +252,8 @@ async fn handle_index_status(State(state): State<AppState>) -> impl IntoResponse
 
     let mut files_indexed = 0usize;
     let mut size_bytes = 0u64;
-    for subdir in ["text", "images"] {
-        let dir = outputs_base.join(subdir);
+    for mode in [SearchMode::Text, SearchMode::Images] {
+        let dir = search_subdir(&outputs_base, &mode);
         if let Ok(idx) = MetadataIndex::build(&dir, &person_field_names, &date_field_names) {
             files_indexed += idx.entries.len();
             size_bytes += idx.entries.values()
@@ -271,18 +271,6 @@ async fn handle_index_status(State(state): State<AppState>) -> impl IntoResponse
         "running": false,
         "outputsDir": outputs_base.display().to_string(),
     }))
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-fn images_snippet(meta: &pdf_core::search::ResultMeta) -> String {
-    format!(
-        "person: {}\ndoc_type: {}\ndate: {}\ninstitution: {}",
-        meta.person.as_deref().unwrap_or(""),
-        meta.doc_type.as_deref().unwrap_or(""),
-        meta.date.as_deref().unwrap_or(""),
-        meta.institution.as_deref().unwrap_or(""),
-    )
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────

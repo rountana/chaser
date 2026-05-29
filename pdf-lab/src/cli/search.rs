@@ -62,7 +62,7 @@ pub async fn run(args: SearchArgs) -> anyhow::Result<()> {
             let mut r = metadata::search(&signals, &index);
             r.truncate(candidate_limit);
             for result in &mut r {
-                result.snippet = images_snippet(&result.meta);
+                result.snippet = super::images_snippet(&result.meta);
             }
             all_results.append(&mut r);
         }
@@ -151,16 +151,6 @@ pub async fn run(args: SearchArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-fn images_snippet(meta: &pdf_core::search::ResultMeta) -> String {
-    format!(
-        "person: {}\ndoc_type: {}\ndate: {}\ninstitution: {}",
-        meta.person.as_deref().unwrap_or(""),
-        meta.doc_type.as_deref().unwrap_or(""),
-        meta.date.as_deref().unwrap_or(""),
-        meta.institution.as_deref().unwrap_or(""),
-    )
 }
 
 fn print_result(result: &SearchResult) {
