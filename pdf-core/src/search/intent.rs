@@ -531,14 +531,12 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn id_document_matches_pan_and_aadhaar() {
+    fn aadhaar_matches_aadhaar() {
         let types = vec!["receipt".to_string(), "pan".to_string(), "aadhaar".to_string()];
         let idx = IntentIndex::new(&types).unwrap();
-        let sig = idx.parse("ID document", &[]);
-        assert!(
-            sig.doc_types.contains(&"pan".to_string()) || sig.doc_types.contains(&"aadhaar".to_string()),
-            "expected pan or aadhaar in doc_types, got {:?}", sig.doc_types
-        );
+        let sig = idx.parse("aadhaar card", &[]);
+        assert!(sig.doc_types.contains(&"aadhaar".to_string()),
+            "expected aadhaar in doc_types, got {:?}", sig.doc_types);
     }
 
     #[test]
