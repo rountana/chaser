@@ -20,6 +20,7 @@ grep-regex = "0.1"
 ignore = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
+fastembed = "4"
 toml = "0.8"
 # System dependency: brew install tesseract leptonica  (macOS)
 #                   apt-get install libtesseract-dev libleptonica-dev tesseract-ocr  (Ubuntu)
