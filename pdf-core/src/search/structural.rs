@@ -11,19 +11,19 @@ static PAGE_MARKER: Lazy<Regex> =
 /// Search by structural properties (page or word count thresholds).
 ///
 /// Returns all matching files — no internal limit (the query defines the threshold explicitly).
-pub fn search(signals: &IntentSignals, outputs_dir: &Path) -> Vec<SearchResult> {
+pub fn search(signals: &IntentSignals, index_dir: &Path) -> Vec<SearchResult> {
     let struct_sig = match &signals.structural {
         Some(s) => s,
         None => return vec![],
     };
 
-    if !outputs_dir.exists() {
+    if !index_dir.exists() {
         return vec![];
     }
 
     let mut results = Vec::new();
 
-    let walker = ignore::WalkBuilder::new(outputs_dir)
+    let walker = ignore::WalkBuilder::new(index_dir)
         .hidden(false)
         .git_ignore(false)
         .build();
@@ -39,8 +39,12 @@ pub fn search(signals: &IntentSignals, outputs_dir: &Path) -> Vec<SearchResult> 
             Err(_) => continue,
         };
 
-        let source_path = crate::frontmatter::parse_frontmatter(&content)
+        let fm = crate::frontmatter::parse_frontmatter(&content);
+        let source_path = fm.as_ref()
             .and_then(|fm| fm.get("source_file")?.as_str().map(std::path::PathBuf::from));
+        let extraction_mode = fm.as_ref()
+            .and_then(|fm| fm.get("extraction_mode")?.as_str().map(str::to_owned))
+            .unwrap_or_default();
 
         let body = crate::frontmatter::strip_frontmatter(&content);
 
@@ -88,6 +92,7 @@ pub fn search(signals: &IntentSignals, outputs_dir: &Path) -> Vec<SearchResult> 
                 words,
             },
             source_path,
+            extraction_mode,
         });
     }
 

@@ -19,21 +19,21 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 export const api = {
-  search: (query: string, top = 12, outputsDir?: string, mode: 'text' | 'images' = 'text') => {
+  search: (query: string, top = 12, indexDir?: string, mode: 'text' | 'images' = 'text') => {
     const params = new URLSearchParams({ q: query, top: String(top), mode })
-    if (outputsDir) params.set('outputs_dir', outputsDir)
+    if (indexDir) params.set('index_dir', indexDir)
     return get<RustSearchResult[]>(`/search?${params}`)
   },
 
-  indexStatus: (outputsDir?: string) => {
-    const params = outputsDir ? `?outputs_dir=${encodeURIComponent(outputsDir)}` : ''
+  indexStatus: (indexDir?: string) => {
+    const params = indexDir ? `?index_dir=${encodeURIComponent(indexDir)}` : ''
     return get<IndexStatus>(`/index/status${params}`)
   },
 
   settings: () => get<AppSettings>('/settings'),
 
   saveSettings: (s: Partial<{
-    outputsDir: string
+    indexDir: string
     schemaPath: string | null
     mode: 'offline' | 'online'
     apiKey: string

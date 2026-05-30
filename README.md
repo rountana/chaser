@@ -1,16 +1,18 @@
-# pdf-lab
+# Chaser
 
-Local document extraction and search — extracts PDFs and images into structured Markdown using an LLM backend (Claude, Gemini, or Ollama), then lets you search them via a dark-themed web UI or the CLI.
+Local document extraction and search — extracts PDFs and images into structured Markdown, then lets you search them via a dark-themed web UI or the CLI.
 
 ## Overview
 
-`pdf-lab` processes your documents in two steps:
+`pdf-lab` processes your documents in two phases:
 
-1. **Extract** — renders each PDF page with pdfium (text layer, or PNG at 300 DPI for scanned pages), then calls the configured LLM backend to produce structured output: page text + YAML metadata (person, doc type, date, institution). Results are written as `.md` files in an `outputs/` directory.
+1. **Extract (offline)** — renders each PDF page with pdfium (text layer, or PNG at 300 DPI for scanned pages), runs Tesseract OCR for image docs, and fills metadata from filename and body-text heuristics. No LLM call. No network. No API key. Results are written as `.md` files under `outputs/offline/`.
 
-2. **Search** — reads the `.md` files at query time. Metadata queries (person names, document types, dates) hit an in-memory index; keyword queries use ripgrep-style search. Sub-folders are searched recursively.
+2. **Extract (online, optional)** — reads the offline outputs and calls the configured LLM backend (Claude, Gemini, or Ollama) to reformat tables, extract schema fields, and run vision passes on image docs. Enriched files are written under `outputs/online/`. Requires an API key.
 
-No database. No embedding server. The only network call is to the configured LLM during extraction.
+3. **Search** — reads from a merged view (`online/` preferred, `offline/` fallback) at query time. Metadata queries hit an in-memory index; keyword queries use FTS5 or ripgrep-style search. Sub-folders are searched recursively.
+
+Offline extraction is fully air-gapped. The only network calls are to the configured LLM during online enrichment.
 
 ## Quick start
 
@@ -18,18 +20,21 @@ No database. No embedding server. The only network call is to the configured LLM
 # 1. Build and install the CLI
 cargo install --path pdf-lab --force
 
-# 2. Configure
+# 2. Extract offline (no API key needed)
+pdf-lab extract offline agreement.pdf receipt.jpg
+
+# 3. (Optional) Enrich with LLM
 pdf-lab config set --api-key sk-ant-...
 pdf-lab config set --backend claude          # claude | gemini | ollama
-pdf-lab config set --outputs-dir ~/Documents/pdf-lab-outputs
+pdf-lab extract online --all                 # enriches all offline-extracted files
 
-# 3. Extract some documents
-pdf-lab extract agreement.pdf receipt.jpg
+# 4. Build the index
+pdf-lab index
 
-# 4. Search from the CLI
+# 5. Search from the CLI
 pdf-lab search "stamp duty"
 
-# 5. Or open the web UI  ↓ see section below
+# 6. Or open the web UI  ↓ see section below
 ```
 
 ## Running the web UI
@@ -152,46 +157,71 @@ pdf-lab config test --local
 
 ### Extract documents
 
+Extraction is split into two explicit phases:
+
 ```bash
-# Extract specific files
-pdf-lab extract agreement_to_sell.pdf Hema_PAN.jpg Receipt_30_10_2025.pdf
+# Phase 1 — offline (local only, no API key, no network)
+pdf-lab extract offline agreement_to_sell.pdf Hema_PAN.jpg Receipt_30_10_2025.pdf
+pdf-lab extract offline                        # extract everything in source_dir
 
-# Extract everything in source_dir
-pdf-lab extract
-
-pdf-lab extract <relative source path>
+# Phase 2 — online (LLM enrichment, reads from offline outputs)
+pdf-lab extract online agreement_to_sell.pdf   # enrich specific files
+pdf-lab extract online --all                   # enrich all offline files not yet in online/
 ```
-
 
 Options:
 ```
-pdf-lab extract [paths...] [--source-dir DIR] [--outputs-dir DIR] [--json] [--auto-schema]
+pdf-lab extract offline <paths...> [--outputs-dir DIR] [--json]
+pdf-lab extract online  <paths...> [--outputs-dir DIR] [--json] [--all]
 ```
 
-The backend used for extraction is whatever is configured via `pdf-lab config set --backend`. No per-run flags.
+`--outputs-dir` sets the parent directory (default: `./outputs`). The `offline/` and `online/` subdirectories are always appended automatically.
 
-JSON lines output (with `--json`):
+`--all` (online only): enriches every file in `outputs/offline/` that does not yet have a corresponding entry in `outputs/online/`.
+
+The backend used for online enrichment is whatever is configured via `pdf-lab config set --backend`. No per-run flags.
+
+**Offline JSON lines output (with `--json`):**
 ```json
 {"event":"started","file":"agreement_to_sell.pdf"}
-{"event":"complete","file":"agreement_to_sell.pdf","output":"outputs/agreement_to_sell.md","chars_extracted":2341}
-{"event":"error","file":"bad.pdf","message":"Claude API error: 429 rate limit"}
+{"event":"complete","file":"agreement_to_sell.pdf","output":"outputs/offline/text/agreement_to_sell.md","chars_extracted":2341,"doc_type":"agreement","person":"Shyam","date":"2025-10-30","doc_category":"text","extraction_mode":"offline","elapsed_ms":312}
+{"event":"error","file":"bad.pdf","message":"pdfium render failed: ..."}
+```
+
+**Online JSON lines output (with `--json`):**
+```json
+{"event":"started","file":"agreement_to_sell.md"}
+{"event":"complete","file":"agreement_to_sell.md","output":"outputs/online/text/agreement_to_sell.md","chars_extracted":2489,"doc_type":"agreement","person":"Shyam","date":"2025-10-30","doc_category":"text","extraction_mode":"online","elapsed_ms":3104}
+{"event":"error","file":"bad.md","message":"No offline extraction found — run 'pdf-lab extract offline bad.pdf' first"}
 ```
 
 ### Search
 
 ```bash
+# Basic keyword and metadata queries
 pdf-lab search "Hema's PAN"
 pdf-lab search "receipts from October 2025"
 pdf-lab search "stamp duty"
+
+# Doc type filters are parsed automatically from the query
+pdf-lab search "show me all receipts"
+pdf-lab search "Shyam's agreement from 2025"
+pdf-lab search "bank statements from last quarter"
+pdf-lab search "w2 forms" --top 10
+
+# Search image documents (metadata only — reads outputs/images/)
+pdf-lab search "Hema's Aadhaar" --mode images
+pdf-lab search "PAN cards from 2024" --mode images
 ```
 
 Options:
 ```
-pdf-lab search <query> [--top N] [--outputs-dir DIR] [--json]
+pdf-lab search <query> [--top N] [--outputs-dir DIR] [--mode text|images] [--json]
 ```
 
 - `--top N` — number of results (default: 5)
 - `--outputs-dir` — where to find `.md` files (searched recursively; default: `./outputs`)
+- `--mode` — search pool: `text` (all backends, `outputs/text/`) or `images` (metadata only, `outputs/images/`); default: `text`
 
 Human-readable output:
 ```
@@ -256,19 +286,26 @@ Starts a stdio JSON-RPC 2.0 MCP server. Exposes three tools:
 
 ## Output format
 
-Every extracted file is a Markdown file with a YAML frontmatter block:
+Every extracted file is a Markdown file with a YAML frontmatter block. Two fields are added by each phase:
 
+- `extraction_mode` — `"offline"` (heuristic extraction) or `"online"` (LLM-enriched)
+- `elapsed_ms` — wall-clock milliseconds from extraction start to file write
+
+**Offline output** (`outputs/offline/text/agreement_to_sell.md`):
 ```markdown
 ---
-title: AGREEMENT - Shyam
+title: Agreement to Sell
 person: Shyam
 doc_type: agreement
 date: 2025-10-30
 institution: ""
 source_file: /path/to/agreement_to_sell.pdf
 pages: 4
-ocr_method: llm-vision
-extracted_at: 2026-05-22T10:00:00Z
+doc_category: text
+extraction_mode: offline
+ocr_method: text-embedded
+elapsed_ms: 312
+extracted_at: 2026-05-29T10:00:00Z
 ---
 [Page 1]
 THIS AGREEMENT TO SELL...
@@ -277,7 +314,9 @@ THIS AGREEMENT TO SELL...
 ...
 ```
 
-Supported `doc_type` values: `pan` · `aadhaar` · `passport` · `cheque` · `receipt` · `agreement` · `deed` · `khata` · `oc` · `ecc` · `layout` · `unknown`
+**Online output** (`outputs/online/text/agreement_to_sell.md`) has the same structure with `extraction_mode: online` and LLM-enriched field values.
+
+Supported `doc_type` values: `passport` · `drivers_license` · `check` · `cheque` · `receipt` · `invoice` · `bank_statement` · `agreement` · `deed` · `w2` · `w9` · `1099` · `tax_return` · `pay_stub` · `insurance` · `utility_bill` · `lease` · `aadhaar` · `pan` · `khata` · `ecc` · `oc` · `layout` · `unknown`
 
 ## Project structure
 
@@ -328,8 +367,9 @@ pdf-lab/claude-sdk/
 |-------|--------|-------|
 | 1 — Extraction + Metadata/Keyword | **Done** | pdfium rendering, Claude extraction, metadata + keyword search, MCP server |
 | 2 — Query Router + Search UI | **Done** | 7-rule router, `classify_query` MCP tool, structural backend, Axum HTTP server, Vite/React UI |
-| 3 — CLI Polish + Optimizations | Planned | Batch API, prompt caching, result ranking, Tauri desktop packaging |
-| 4 — Semantic Search | Planned | LanceDB + fastembed (nomic-embed-text-v1.5), ANN index |
+| 3 — Offline/Online Split | **In Progress** | `extract offline` (local, no API key) + `extract online` (LLM enrichment), merged view for index/search |
+| 4 — CLI Polish + Optimizations | Planned | Batch API, prompt caching, result ranking, Tauri desktop packaging |
+| 5 — Semantic Search | Planned | LanceDB + fastembed (nomic-embed-text-v1.5), ANN index |
 
 ## Supported file types
 

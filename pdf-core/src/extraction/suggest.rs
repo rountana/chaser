@@ -14,24 +14,25 @@ pub struct SuggestedField {
     pub searchable: bool,
 }
 
-const SYSTEM_PROMPT: &str = "\
-You are a document schema designer. Your job is to identify the structured metadata fields \
-that are worth extracting from a specific type of document for filing and search purposes.
-
-The following global fields are already extracted from EVERY document — do NOT include them:
-  date, person, institution
-
-Only suggest fields SPECIFIC to this document type. Use snake_case names.
-Choose the most appropriate type for each field:
-  freetext   — free-form text (names, identifiers, descriptions)
-  person     — a person's full name
-  date       — a single date (YYYY-MM-DD)
-  date_range — a date range e.g. billing period, coverage period
-  currency   — a monetary amount (no symbol)
-
-Mark required=true only if the field is virtually always present in this document type.
-Mark searchable=true for fields users would filter or search by (e.g. vendor name, policy number).
-Call submit_field_suggestions once with your suggestions.";
+fn build_system_prompt(global_field_names: &[&str]) -> String {
+    let excluded = global_field_names.join(", ");
+    format!(
+        "You are a document schema designer. Your job is to identify the structured metadata fields \
+that are worth extracting from a specific type of document for filing and search purposes.\n\n\
+The following global fields are already extracted from EVERY document — do NOT include them:\n  \
+{excluded}\n\n\
+Only suggest fields SPECIFIC to this document type. Use snake_case names.\n\
+Choose the most appropriate type for each field:\n  \
+freetext   — free-form text (names, identifiers, descriptions)\n  \
+person     — a person's full name\n  \
+date       — a single date (YYYY-MM-DD)\n  \
+date_range — a date range e.g. billing period, coverage period\n  \
+currency   — a monetary amount (no symbol)\n\n\
+Mark required=true only if the field is virtually always present in this document type.\n\
+Mark searchable=true for fields users would filter or search by (e.g. vendor name, policy number).\n\
+Call submit_field_suggestions once with your suggestions."
+    )
+}
 
 /// Single-turn Claude call that suggests per-type schema fields for an unknown document type.
 /// `first_page_text` may be empty — Claude falls back to domain knowledge of the doc type.
@@ -49,6 +50,12 @@ pub async fn call_claude_suggest_fields(
         "Document type: {doc_type}\n\nFirst page text:\n{first_page_text}"
     );
 
+    let system_prompt = build_system_prompt(global_field_names);
+    let fields_desc = format!(
+        "Per-type fields to extract. Do not include global fields ({}).",
+        global_field_names.join(", ")
+    );
+
     let tools = json!([{
         "name": "submit_field_suggestions",
         "description": "Submit the suggested per-type schema fields for this document type.",
@@ -58,7 +65,7 @@ pub async fn call_claude_suggest_fields(
             "properties": {
                 "fields": {
                     "type": "array",
-                    "description": "Per-type fields to extract. Do not include global fields (date, person, institution).",
+                    "description": fields_desc,
                     "items": {
                         "type": "object",
                         "required": ["name", "type"],
@@ -77,7 +84,7 @@ pub async fn call_claude_suggest_fields(
     let body = json!({
         "model": config.model,
         "max_tokens": 512,
-        "system": SYSTEM_PROMPT,
+        "system": system_prompt,
         "tools": tools,
         "tool_choice": {"type": "any"},
         "messages": [{"role": "user", "content": user_content}]
@@ -132,6 +139,12 @@ pub async fn call_ollama_suggest_fields(
         "Document type: {doc_type}\n\nFirst page text:\n{first_page_text}"
     );
 
+    let system_prompt = build_system_prompt(global_field_names);
+    let fields_desc = format!(
+        "Per-type fields to extract. Do not include global fields ({}).",
+        global_field_names.join(", ")
+    );
+
     let tools = json!([{
         "type": "function",
         "function": {
@@ -143,7 +156,7 @@ pub async fn call_ollama_suggest_fields(
                 "properties": {
                     "fields": {
                         "type": "array",
-                        "description": "Per-type fields to extract. Do not include global fields (date, person, institution).",
+                        "description": fields_desc,
                         "items": {
                             "type": "object",
                             "required": ["name", "type"],
@@ -164,7 +177,7 @@ pub async fn call_ollama_suggest_fields(
         "model": model,
         "stream": false,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user",   "content": user_content}
         ],
         "tools": tools

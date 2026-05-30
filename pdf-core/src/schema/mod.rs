@@ -109,11 +109,6 @@ static HONORIFICS: &[&str] = &[
     "mr ", "mrs ", "ms ", "dr ", "prof ",
 ];
 
-const DEFAULT_DOC_TYPES: &[&str] = &[
-    "passport", "drivers_license", "ssn", "check", "receipt",
-    "invoice", "agreement", "deed", "w9", "w2", "1099", "id", "unknown",
-];
-
 // ---------------------------------------------------------------------------
 // SchemaRegistry implementation
 // ---------------------------------------------------------------------------
@@ -133,28 +128,25 @@ impl SchemaRegistry {
         PathBuf::from("config/pdf-lab/schema.toml")
     }
 
-    /// Load from the default path, falling back to the built-in schema if not found.
-    pub fn load_default() -> Self {
-        Self::load_or_default(&Self::default_config_path())
+    /// Load from the default path. Fails if the file does not exist or cannot be parsed.
+    pub fn load_default() -> anyhow::Result<Self> {
+        Self::load(&Self::default_config_path())
     }
 
-    pub fn load_or_default(path: &Path) -> Self {
-        if path.exists() {
-            Self::load(path).unwrap_or_else(|e| {
-                eprintln!("[schema] failed to load {}: {e:#}, using built-in defaults", path.display());
-                Self::default_schema()
-            })
-        } else {
-            Self::default_schema()
-        }
+    /// Parse a SchemaRegistry from a TOML string. Intended for unit tests.
+    #[cfg(test)]
+    pub(crate) fn from_toml_str(s: &str) -> anyhow::Result<Self> {
+        let raw: RawSchema = toml::from_str(s).context("parsing schema TOML")?;
+        Ok(Self::from_raw(raw, "inline".to_string()))
     }
 
-    /// Load from a file path, a directory (first `schema.toml` found, sorted), or fall back to
-    /// the default config path. Pass `None` to use the default.
-    pub fn load_auto(path: Option<&Path>) -> Self {
+    /// Load from a file path, a directory (first `schema.toml` found, sorted), or the default
+    /// config path. Fails with a clear error when no schema can be located or parsed.
+    /// Pass `None` to use the default path.
+    pub fn load_auto(path: Option<&Path>) -> anyhow::Result<Self> {
         match path {
             None => Self::load_default(),
-            Some(p) if p.is_file() => Self::load_or_default(p),
+            Some(p) if p.is_file() => Self::load(p),
             Some(p) if p.is_dir() => {
                 let mut found: Vec<std::path::PathBuf> = ignore::WalkBuilder::new(p)
                     .hidden(false)
@@ -166,46 +158,11 @@ impl SchemaRegistry {
                     .collect();
                 found.sort();
                 match found.first() {
-                    Some(f) => Self::load_or_default(f),
-                    None => {
-                        eprintln!("[schema] no schema.toml found under {}", p.display());
-                        Self::default_schema()
-                    }
+                    Some(f) => Self::load(f),
+                    None => anyhow::bail!("no schema.toml found under {}", p.display()),
                 }
             }
-            Some(p) => {
-                eprintln!("[schema] schema path does not exist: {}", p.display());
-                Self::default_schema()
-            }
-        }
-    }
-
-    pub fn default_schema() -> Self {
-        SchemaRegistry {
-            doc_type_values: DEFAULT_DOC_TYPES.iter().map(|s| s.to_string()).collect(),
-            doc_type_default: "unknown".to_string(),
-            global_fields: vec![
-                FieldDef {
-                    name: "person".to_string(),
-                    field_type: FieldType::Person,
-                    required: false,
-                    searchable: true,
-                },
-                FieldDef {
-                    name: "date".to_string(),
-                    field_type: FieldType::Date,
-                    required: false,
-                    searchable: true,
-                },
-                FieldDef {
-                    name: "institution".to_string(),
-                    field_type: FieldType::FreeText,
-                    required: false,
-                    searchable: false,
-                },
-            ],
-            type_fields: HashMap::new(),
-            schema_hash: "default".to_string(),
+            Some(p) => anyhow::bail!("schema path does not exist: {}", p.display()),
         }
     }
 
@@ -759,9 +716,31 @@ pub fn normalise_currency(raw: &str) -> String {
 mod tests {
     use super::*;
 
+    fn test_schema() -> SchemaRegistry {
+        let toml_src = r#"
+[doc_type]
+values  = ["receipt","invoice","drivers_license","check","w9","unknown"]
+default = "unknown"
+
+[[fields]]
+name       = "date"
+type       = "date"
+required   = false
+searchable = true
+
+[[fields]]
+name       = "person"
+type       = "person"
+required   = false
+searchable = true
+"#;
+        let raw: RawSchema = toml::from_str(toml_src).expect("test schema should parse");
+        SchemaRegistry::from_raw(raw, "test".to_string())
+    }
+
     #[test]
     fn coerce_doc_type_known_value() {
-        let s = SchemaRegistry::default_schema();
+        let s = test_schema();
         // Known values still fuzzy-match to the schema entry
         assert_eq!(s.coerce_doc_type("receipt"), "receipt");
         assert_eq!(s.coerce_doc_type("INVOICE"), "invoice");
@@ -770,7 +749,7 @@ mod tests {
 
     #[test]
     fn coerce_doc_type_free_text() {
-        let s = SchemaRegistry::default_schema();
+        let s = test_schema();
         // Unknown types come back sanitized, not "unknown"
         assert_eq!(s.coerce_doc_type("utility bill"), "utility_bill");
         assert_eq!(s.coerce_doc_type("Tax Return"), "tax_return");
@@ -779,7 +758,7 @@ mod tests {
 
     #[test]
     fn coerce_doc_type_empty_falls_back() {
-        let s = SchemaRegistry::default_schema();
+        let s = test_schema();
         assert_eq!(s.coerce_doc_type(""), "unknown");
         assert_eq!(s.coerce_doc_type("!!!"), "unknown");
     }
@@ -826,8 +805,8 @@ mod tests {
     }
 
     #[test]
-    fn default_schema_has_expected_fields() {
-        let s = SchemaRegistry::default_schema();
+    fn schema_has_expected_global_fields_and_doc_types() {
+        let s = test_schema();
         assert!(s.global_fields.iter().any(|f| f.name == "person"));
         assert!(s.global_fields.iter().any(|f| f.name == "date"));
         assert!(s.infer_doc_type_from_stem("John_W9_2025.pdf").is_some());
@@ -942,7 +921,7 @@ due_date     = { type = "date", required = false, searchable = false }
 
     #[test]
     fn infer_doc_type_from_stem_extended() {
-        let schema = SchemaRegistry::default_schema();
+        let schema = test_schema();
         assert_eq!(schema.infer_doc_type_from_stem("Receipt_10_30_2025"), Some("receipt".to_string()));
         assert_eq!(schema.infer_doc_type_from_stem("Alex_Carter_Drivers_License"), Some("drivers_license".to_string()));
         assert_eq!(schema.infer_doc_type_from_stem("Voided_Check_Chase"), Some("check".to_string()));

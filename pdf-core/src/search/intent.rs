@@ -174,6 +174,14 @@ impl IntentIndex {
             return vec![];
         }
 
+        // Substring pre-filter: "invoices" contains "invoice", "receipts" contains "receipt".
+        // Runs before the embedding call so plurals/truncations match without hitting threshold.
+        let dt_labels: Vec<&str> = self.doc_type_embeddings.iter().map(|(l, _)| l.as_str()).collect();
+        let pre = substring_match_doc_types(&tokens, &dt_labels);
+        if !pre.is_empty() {
+            return pre;
+        }
+
         let candidates: Vec<String> = build_ngram_candidates(&tokens);
         if candidates.is_empty() {
             return vec![];
@@ -320,6 +328,24 @@ fn extract_structural(query_lower: &str) -> Option<StructSignal> {
 
 fn parse_field(s: &str) -> StructField {
     if s.to_lowercase().starts_with("word") { StructField::Words } else { StructField::Pages }
+}
+
+/// Substring match: returns any doc_type label where a token is a substring of the label
+/// or the label is a substring of a token. Case-insensitive.
+fn substring_match_doc_types(tokens: &[&str], dt_labels: &[&str]) -> Vec<String> {
+    let mut matched: Vec<String> = Vec::new();
+    for token in tokens {
+        for &label in dt_labels {
+            let label_lower = label.to_lowercase();
+            if token.contains(label_lower.as_str()) || label_lower.contains(*token) {
+                let owned = label.to_string();
+                if !matched.contains(&owned) {
+                    matched.push(owned);
+                }
+            }
+        }
+    }
+    matched
 }
 
 fn build_ngram_candidates(tokens: &[&str]) -> Vec<String> {
@@ -496,5 +522,39 @@ mod tests {
         assert!(candidates.contains(&"me old contracts".to_string()));
         // 4-gram excluded
         assert!(!candidates.contains(&"show me old contracts".to_string()));
+    }
+
+    // Substring pre-filter tests — call the standalone fn directly, no model required.
+
+    #[test]
+    fn substring_prefilter_plural_to_singular() {
+        let labels = &["invoice", "receipt", "agreement"];
+        let matched = super::substring_match_doc_types(&["invoices"], labels);
+        assert!(matched.contains(&"invoice".to_string()),
+            "plural 'invoices' should pre-filter match 'invoice', got {:?}", matched);
+    }
+
+    #[test]
+    fn substring_prefilter_receipts() {
+        let labels = &["invoice", "receipt", "agreement"];
+        let matched = super::substring_match_doc_types(&["receipts"], labels);
+        assert!(matched.contains(&"receipt".to_string()),
+            "plural 'receipts' should pre-filter match 'receipt', got {:?}", matched);
+    }
+
+    #[test]
+    fn substring_prefilter_exact_label() {
+        let labels = &["invoice", "receipt"];
+        let matched = super::substring_match_doc_types(&["invoice"], labels);
+        assert!(matched.contains(&"invoice".to_string()),
+            "exact label 'invoice' should pre-filter match, got {:?}", matched);
+    }
+
+    #[test]
+    fn substring_prefilter_no_false_positive() {
+        let labels = &["invoice", "receipt"];
+        let matched = super::substring_match_doc_types(&["notes", "meeting"], labels);
+        assert!(matched.is_empty(),
+            "unrelated tokens should not pre-filter match, got {:?}", matched);
     }
 }

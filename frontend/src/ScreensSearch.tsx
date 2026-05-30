@@ -34,9 +34,16 @@ const FOLDER_TREE = [
   { ind: '▸', name: 'Downloads', depth: 0 },
 ]
 
+type TierFilter = 'all' | 'offline' | 'online'
+
 // ── Sidebar ─────────────────────────────────────────────────────────────────
 
-function Sidebar() {
+interface SidebarProps {
+  tierFilter: TierFilter
+  setTierFilter: (t: TierFilter) => void
+}
+
+function Sidebar({ tierFilter, setTierFilter }: SidebarProps) {
   return (
     <aside className="sb">
       <h4>scope</h4>
@@ -44,6 +51,20 @@ function Sidebar() {
         <span className="chip on">all files</span>
         <span className="chip">docs</span>
         <span className="chip">pdf</span>
+      </div>
+
+      <h4>tier</h4>
+      <div className="chip-row" style={{ padding: '0 4px' }}>
+        {(['all', 'offline', 'online'] as TierFilter[]).map(t => (
+          <span
+            key={t}
+            className={`chip${tierFilter === t ? ' on' : ''}`}
+            onClick={() => setTierFilter(t)}
+            style={{ cursor: 'pointer' }}
+          >
+            {t}
+          </span>
+        ))}
       </div>
 
       <h4>library</h4>
@@ -85,11 +106,9 @@ interface SearchBarProps {
   setQuery: (q: string) => void
   onSearch: (q: string) => void
   intent?: string
-  searchMode: 'text' | 'images'
-  setSearchMode: (m: 'text' | 'images') => void
 }
 
-function SearchBar({ query, setQuery, onSearch, intent = 'keyword', searchMode, setSearchMode }: SearchBarProps) {
+function SearchBar({ query, setQuery, onSearch, intent = 'keyword' }: SearchBarProps) {
   return (
     <div className="searchbar">
       <div className="input-wrap">
@@ -104,28 +123,6 @@ function SearchBar({ query, setQuery, onSearch, intent = 'keyword', searchMode, 
           <span className="dot" />
           <span>intent · {intent}</span>
         </span>
-      </div>
-      <div className="mode-toggle" role="group" aria-label="Search pool">
-        <label className={`mode-opt${searchMode === 'text' ? ' on' : ''}`}>
-          <input
-            type="radio"
-            name="searchMode"
-            value="text"
-            checked={searchMode === 'text'}
-            onChange={() => setSearchMode('text')}
-          />
-          Documents (PDFs)
-        </label>
-        <label className={`mode-opt${searchMode === 'images' ? ' on' : ''}`}>
-          <input
-            type="radio"
-            name="searchMode"
-            value="images"
-            checked={searchMode === 'images'}
-            onChange={() => setSearchMode('images')}
-          />
-          Images &amp; Scans
-        </label>
       </div>
     </div>
   )
@@ -178,6 +175,28 @@ interface CardProps {
   showScores: boolean
 }
 
+function TierBadge({ mode }: { mode?: 'offline' | 'online' }) {
+  if (!mode) return null
+  const isOnline = mode === 'online'
+  return (
+    <span
+      className="pill mono"
+      style={{
+        fontSize: 10,
+        padding: '1px 5px',
+        background: isOnline ? 'var(--accent-dim)' : 'var(--surface-2)',
+        color: isOnline ? 'var(--accent)' : 'var(--text-muted)',
+        borderRadius: 4,
+        fontWeight: 500,
+        letterSpacing: '0.02em',
+        flexShrink: 0,
+      }}
+    >
+      {mode}
+    </span>
+  )
+}
+
 function ResultCard({ r, selected, onClick, layout, showScores }: CardProps) {
   return (
     <div className={`card${selected ? ' is-selected' : ''}`} onClick={onClick}>
@@ -185,6 +204,7 @@ function ResultCard({ r, selected, onClick, layout, showScores }: CardProps) {
       <div className="body">
         <div className="filename">
           <span className="name">{r.filename}</span>
+          <TierBadge mode={r.extractionMode} />
           {showScores && layout === 'list' && <ScoreBar value={r.score} />}
         </div>
         <div className="path">{r.path}</div>
@@ -267,6 +287,9 @@ function PreviewPanel({ result }: { result: UIResult }) {
         {result.meta?.pages && <><dt>Pages</dt><dd>{result.meta.pages}</dd></>}
         {result.meta?.words && <><dt>Words</dt><dd>{result.meta.words.toLocaleString()}</dd></>}
         <dt>Backend</dt><dd className="mono">{result.backend}</dd>
+        {result.extractionMode && (
+          <><dt>Tier</dt><dd><TierBadge mode={result.extractionMode} /></dd></>
+        )}
       </dl>
 
       <div className="actions">
@@ -290,9 +313,11 @@ function PreviewPanel({ result }: { result: UIResult }) {
 
 interface ScreenEmptyProps {
   onSearch: (q: string) => void
+  searchMode: 'text' | 'images'
+  setSearchMode: (m: 'text' | 'images') => void
 }
 
-export function ScreenEmpty({ onSearch }: ScreenEmptyProps) {
+export function ScreenEmpty({ onSearch, searchMode, setSearchMode }: ScreenEmptyProps) {
   const [input, setInput] = useState('')
   const recent = [
     { ic: 'fileText', q: 'invoices from last quarter' },
@@ -320,10 +345,17 @@ export function ScreenEmpty({ onSearch }: ScreenEmptyProps) {
             autoFocus
             onKeyDown={(e) => { if (e.key === 'Enter' && input.trim()) onSearch(input.trim()) }}
           />
-          <span className="pill accent">
-            <Icon name="sparkles" size={11} />
-            smart search
-          </span>
+          <span className="divider" />
+          <div className="seg-toggle" role="group" aria-label="Search pool">
+            <button
+              className={`seg${searchMode === 'text' ? ' on' : ''}`}
+              onClick={() => setSearchMode('text')}
+            >Docs</button>
+            <button
+              className={`seg${searchMode === 'images' ? ' on' : ''}`}
+              onClick={() => setSearchMode('images')}
+            >Images</button>
+          </div>
         </div>
         <div className="recents">
           <div className="section-label" style={{ padding: '10px 12px 4px' }}>Recent</div>
@@ -359,19 +391,19 @@ interface ScreenResultsProps {
   setShowScores: (v: boolean) => void
   withPreview?: boolean
   onSearch: (q: string) => void
-  outputsDir: string
+  indexDir: string
   searchMode: 'text' | 'images'
-  setSearchMode: (m: 'text' | 'images') => void
 }
 
 export function ScreenResults({
   query, setQuery, selectedId, onSelect,
   layout, setLayout, showScores, setShowScores,
-  withPreview = false, onSearch, outputsDir,
-  searchMode, setSearchMode,
+  withPreview = false, onSearch, indexDir,
+  searchMode,
 }: ScreenResultsProps) {
   const [results, setResults] = useState<UIResult[]>([])
   const [loading, setLoading] = useState(false)
+  const [tierFilter, setTierFilter] = useState<TierFilter>('all')
   const abortRef = useRef<AbortController | null>(null)
 
   const runSearch = useCallback(async (q: string) => {
@@ -379,31 +411,37 @@ export function ScreenResults({
     abortRef.current?.abort()
     abortRef.current = new AbortController()
     setLoading(true)
+    console.debug('[search] query=%o mode=%s indexDir=%s', q, searchMode, indexDir || '(default)')
     try {
-      const raw = await api.search(q, 12, outputsDir || undefined, searchMode)
+      const raw = await api.search(q, 12, indexDir || undefined, searchMode)
+      console.debug('[search] api returned %d results', raw.length, raw)
       setResults(raw.map((r, i) => toUIResult(r, i)))
-    } catch {
+    } catch (err) {
+      console.warn('[search] server unavailable, falling back to mock data', err)
       // Server not running — fall back to mock data
       setResults(MOCK_RESULTS.map((r, i) => toUIResult(r, i)))
     } finally {
       setLoading(false)
     }
-  }, [outputsDir, searchMode])
+  }, [indexDir, searchMode])
 
   useEffect(() => { void runSearch(query) }, [query, runSearch, searchMode])
 
-  const selected = results.find(r => r.id === selectedId) ?? results[0] ?? null
+  const displayResults = tierFilter === 'all'
+    ? results
+    : results.filter(r => r.extractionMode === tierFilter)
+
+  const selected = displayResults.find(r => r.id === selectedId) ?? displayResults[0] ?? null
 
   return (
     <div className={`shell${withPreview ? ' has-preview' : ''}`}>
-      <Sidebar />
+      <Sidebar tierFilter={tierFilter} setTierFilter={setTierFilter} />
       <div className="main">
-        <SearchBar query={query} setQuery={setQuery} onSearch={onSearch}
-          searchMode={searchMode} setSearchMode={setSearchMode} />
+        <SearchBar query={query} setQuery={setQuery} onSearch={onSearch} />
         <Crumbs
           layout={layout} setLayout={setLayout}
           showScores={showScores} setShowScores={setShowScores}
-          count={results.length} total={results.length}
+          count={displayResults.length} total={results.length}
         />
         {loading ? (
           <div style={{ padding: 32, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 13 }}>
@@ -411,7 +449,7 @@ export function ScreenResults({
           </div>
         ) : (
           <div className={`results ${layout}`}>
-            {results.map((r) => (
+            {displayResults.map((r) => (
               <ResultCard
                 key={r.id} r={r}
                 selected={r.id === selectedId}
@@ -419,9 +457,11 @@ export function ScreenResults({
                 onClick={() => onSelect(r.id)}
               />
             ))}
-            {results.length === 0 && (
+            {displayResults.length === 0 && (
               <div style={{ padding: 32, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 13 }}>
-                no results for "{query}"
+                {tierFilter !== 'all'
+                  ? `no ${tierFilter} results for "${query}"`
+                  : `no results for "${query}"`}
               </div>
             )}
           </div>

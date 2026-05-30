@@ -9,20 +9,6 @@ static DATE_DDMMYYYY: Lazy<Regex> =
 static DATE_ISO: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(20\d{2}-\d{2}-\d{2})").unwrap());
 
-// Doc type tokens in longest-match-wins priority order
-const DOC_TYPE_PRIORITY: &[(&str, &str)] = &[
-    ("aadhaar", "aadhaar"),
-    ("passport", "passport"),
-    ("receipt", "receipt"),
-    ("agreement", "agreement"),
-    ("layout", "layout"),
-    ("cheque", "cheque"),
-    ("deed", "deed"),
-    ("khata", "khata"),
-    ("ecc", "ecc"),
-    ("pan", "pan"),
-    ("oc", "oc"),
-];
 
 pub fn extract_date(stem: &str) -> Option<String> {
     let s = stem.replace('-', "_");
@@ -53,23 +39,17 @@ pub fn extract_date(stem: &str) -> Option<String> {
     None
 }
 
-pub fn extract_doc_type(stem: &str) -> Option<String> {
-    let lower = stem.to_lowercase();
-    for (token, doc_type) in DOC_TYPE_PRIORITY {
-        if lower.contains(token) {
-            return Some(doc_type.to_string());
-        }
-    }
-    None
-}
-
-pub fn extract_person(stem: &str, known_persons: &[String]) -> Option<String> {
+pub fn extract_person(
+    stem: &str,
+    known_persons: &[String],
+    doc_type_tokens: &[String],
+) -> Option<String> {
     let lower = stem.to_lowercase();
 
-    // Strip doc_type tokens
+    // Strip doc_type tokens so they don't pollute person matching
     let mut cleaned = lower.clone();
-    for (token, _) in DOC_TYPE_PRIORITY {
-        cleaned = cleaned.replace(token, " ");
+    for token in doc_type_tokens {
+        cleaned = cleaned.replace(token.as_str(), " ");
     }
 
     // Strip front/back tokens

@@ -5,7 +5,7 @@ use clap::Args;
 #[derive(Args)]
 pub struct IndexArgs {
     #[arg(long, help = "Override output directory of .md files to index")]
-    pub outputs_dir: Option<PathBuf>,
+    pub index_dir: Option<PathBuf>,
 }
 
 pub fn run(_args: IndexArgs) -> anyhow::Result<()> {

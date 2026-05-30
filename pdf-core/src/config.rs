@@ -32,7 +32,7 @@ pub struct ClaudeConfig {
     pub api_key: String,
     pub base_url: Option<String>,
     pub source_dir: Option<String>,
-    pub outputs_dir: Option<String>,
+    pub index_dir: Option<String>,
     #[serde(default)]
     pub backend: LlmBackend,
     #[serde(default)]
@@ -57,7 +57,7 @@ impl Default for ClaudeConfig {
             api_key: String::new(),
             base_url: None,
             source_dir: None,
-            outputs_dir: None,
+            index_dir: None,
             backend: LlmBackend::Claude,
             ollama_url: None,
             ollama_model: None,
@@ -93,8 +93,8 @@ impl ClaudeConfig {
         if let Ok(dir) = std::env::var("PDF_LAB_SOURCE_DIR") {
             if !dir.is_empty() { config.source_dir = Some(dir); }
         }
-        if let Ok(dir) = std::env::var("PDF_LAB_OUTPUTS_DIR") {
-            if !dir.is_empty() { config.outputs_dir = Some(dir); }
+        if let Ok(dir) = std::env::var("PDF_LAB_INDEX_DIR") {
+            if !dir.is_empty() { config.index_dir = Some(dir); }
         }
         if let Ok(url) = std::env::var("PDF_LAB_OLLAMA_URL") {
             if !url.is_empty() { config.ollama_url = Some(url); }
@@ -133,9 +133,9 @@ impl ClaudeConfig {
         PathBuf::from("config/pdf-lab/config.json")
     }
 
-    /// Resolved outputs directory: CLI flag > config/env > "./outputs"
-    pub fn resolve_outputs_dir(&self, flag: Option<PathBuf>) -> PathBuf {
-        flag.or_else(|| self.outputs_dir.as_deref().map(PathBuf::from))
+    /// Resolved index directory: CLI flag > config/env > "./outputs"
+    pub fn resolve_index_dir(&self, flag: Option<PathBuf>) -> PathBuf {
+        flag.or_else(|| self.index_dir.as_deref().map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("outputs"))
     }
 

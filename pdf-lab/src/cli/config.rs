@@ -30,7 +30,7 @@ pub struct SetArgs {
     pub source_dir: Option<String>,
 
     #[arg(long, help = "Default output directory for extracted .md files")]
-    pub outputs_dir: Option<String>,
+    pub index_dir: Option<String>,
 
     #[arg(long, help = "Ollama base URL (default: http://localhost:11434)")]
     pub ollama_url: Option<String>,
@@ -84,8 +84,8 @@ fn run_set(args: SetArgs) -> anyhow::Result<()> {
     if let Some(dir) = args.source_dir {
         config.source_dir = if dir.is_empty() { None } else { Some(dir) };
     }
-    if let Some(dir) = args.outputs_dir {
-        config.outputs_dir = if dir.is_empty() { None } else { Some(dir) };
+    if let Some(dir) = args.index_dir {
+        config.index_dir = if dir.is_empty() { None } else { Some(dir) };
     }
     if let Some(url) = args.ollama_url {
         config.ollama_url = if url.is_empty() { None } else { Some(url) };
@@ -134,8 +134,8 @@ fn run_get() -> anyhow::Result<()> {
         config.source_dir.as_deref().unwrap_or("(not set)")
     );
     println!(
-        "  outputs_dir: {}",
-        config.outputs_dir.as_deref().unwrap_or("./outputs (default)")
+        "  index_dir: {}",
+        config.index_dir.as_deref().unwrap_or("./outputs (default)")
     );
     println!("  backend:     {}", config.backend);
     println!();

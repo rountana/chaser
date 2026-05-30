@@ -59,16 +59,16 @@ pub fn infer_doc_type_from_text(text: &str) -> Option<String> {
 }
 
 pub fn infer_date_from_text(text: &str) -> Option<String> {
-    let scan = &text[..text.len().min(3000)];
-    if let Some(c) = DATE_ISO.captures(scan) {
+    let scan: String = text.chars().take(3000).collect();
+    if let Some(c) = DATE_ISO.captures(&scan) {
         return Some(c[0].to_string());
     }
-    if let Some(c) = DATE_DMY.captures(scan) {
+    if let Some(c) = DATE_DMY.captures(&scan) {
         let d = format!("{:02}", c[1].parse::<u32>().unwrap_or(1));
         let m = format!("{:02}", c[2].parse::<u32>().unwrap_or(1));
         return Some(format!("{}-{}-{}", &c[3], m, d));
     }
-    if let Some(c) = DATE_WRITTEN.captures(scan) {
+    if let Some(c) = DATE_WRITTEN.captures(&scan) {
         let month = MONTH_MAP.iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(&c[1]))?
             .1;
@@ -79,8 +79,8 @@ pub fn infer_date_from_text(text: &str) -> Option<String> {
 }
 
 pub fn infer_person_from_text(text: &str) -> Option<String> {
-    let scan = &text[..text.len().min(3000)];
-    PERSON_NEAR_LABEL.captures(scan)
+    let scan: String = text.chars().take(3000).collect();
+    PERSON_NEAR_LABEL.captures(&scan)
         .and_then(|c| {
             let name = c[1].trim().to_string();
             if name.is_empty() { None } else { Some(name) }
@@ -88,8 +88,8 @@ pub fn infer_person_from_text(text: &str) -> Option<String> {
 }
 
 pub fn infer_institution_from_text(text: &str) -> Option<String> {
-    let scan = &text[..text.len().min(3000)];
-    ORG_SUFFIX.captures(scan)
+    let scan: String = text.chars().take(3000).collect();
+    ORG_SUFFIX.captures(&scan)
         .map(|c| c[1].trim().to_string())
         .filter(|s| !s.is_empty())
 }

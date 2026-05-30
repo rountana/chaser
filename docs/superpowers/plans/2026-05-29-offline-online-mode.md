@@ -10,115 +10,50 @@
 
 ---
 
+## Implementation Status
+
+| Task | Status |
+|------|--------|
+| Task 1: Config `mode` + `is_offline()` | ✅ Done |
+| Task 2: Router R6 bypass | ⬜ Pending |
+| Task 3: CLI extract guard | ⬜ Pending |
+| Task 4: Serve settings API | ⬜ Pending |
+| Task 5: Frontend types and API client | ⬜ Pending |
+| Task 6: Frontend Plan component | ⬜ Pending |
+| Task 7: End-to-end verify | ⬜ Pending |
+
+---
+
 ## File Map
 
 | File | Action | What changes |
 |------|--------|-------------|
-| `pdf-core/src/config.rs` | Modify | Add `mode` field + `is_offline()` |
+| `pdf-core/src/config.rs` | ✅ Done | `mode` field + `is_offline()` already added |
 | `pdf-core/src/search/router.rs` | Modify | Skip R6 when `is_offline()` |
 | `pdf-lab/src/cli/extract.rs` | Modify | Guard `run_online` with `is_offline()` bail |
 | `pdf-lab/src/cli/serve.rs` | Modify | GET returns `mode`; POST accepts `mode` + `api_key` |
-| `frontend/src/types.ts` | Modify | Add `mode` to `AppSettings` |
+| `frontend/src/types.ts` | Modify | Add `mode` to `AppSettings`; rename `apiKey` → `apiKeySet: boolean` |
 | `frontend/src/api.ts` | Modify | Extend `saveSettings` to accept `mode` + `apiKey` |
 | `frontend/src/ScreensSystem.tsx` | Modify | Add Plan section to sidebar + `ScreenPlan` component |
 
 ---
 
-## Task 1: Config `mode` field and `is_offline()` helper
+## Task 1: Config `mode` field and `is_offline()` helper ✅ DONE
 
-**Files:**
-- Modify: `pdf-core/src/config.rs`
-
-- [ ] **Step 1: Add the `mode` field to `ClaudeConfig`**
-
-In `pdf-core/src/config.rs`, add after the `gemini_model` field:
+The following changes are already in `pdf-core/src/config.rs`:
 
 ```rust
-pub struct ClaudeConfig {
-    pub model: String,
-    pub api_key: String,
-    pub base_url: Option<String>,
-    pub source_dir: Option<String>,
-    pub outputs_dir: Option<String>,
-    #[serde(default)]
-    pub backend: LlmBackend,
-    #[serde(default)]
-    pub ollama_url: Option<String>,
-    #[serde(default)]
-    pub ollama_model: Option<String>,
-    #[serde(default)]
-    pub schema_path: Option<String>,
-    #[serde(default)]
-    pub gemini_api_key: Option<String>,
-    #[serde(default)]
-    pub gemini_model: Option<String>,
-    #[serde(default)]
-    pub mode: Option<String>,   // "offline" | "online" — None treated as "offline"
-}
-```
+// Field added to ClaudeConfig:
+#[serde(default)]
+pub mode: Option<String>,   // "offline" | "online" — None treated as "offline"
 
-- [ ] **Step 2: Add `is_offline()` to the impl block**
-
-In the `impl ClaudeConfig` block (after `resolved_gemini_model`):
-
-```rust
-/// Returns true when mode is "offline" or unset. Any config without a mode
-/// field defaults to offline so existing installs are not broken.
+// Method added to impl ClaudeConfig:
 pub fn is_offline(&self) -> bool {
     self.mode.as_deref() != Some("online")
 }
 ```
 
-- [ ] **Step 3: Add unit tests**
-
-At the bottom of `pdf-core/src/config.rs`, inside `#[cfg(test)] mod tests`:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn is_offline_when_mode_absent() {
-        let c = ClaudeConfig::default();
-        assert!(c.is_offline());
-    }
-
-    #[test]
-    fn is_offline_when_mode_offline() {
-        let c = ClaudeConfig { mode: Some("offline".to_string()), ..ClaudeConfig::default() };
-        assert!(c.is_offline());
-    }
-
-    #[test]
-    fn is_online_when_mode_online() {
-        let c = ClaudeConfig { mode: Some("online".to_string()), ..ClaudeConfig::default() };
-        assert!(!c.is_offline());
-    }
-
-    #[test]
-    fn is_offline_when_mode_garbage() {
-        // Unknown values default to offline (safe side)
-        let c = ClaudeConfig { mode: Some("garbage".to_string()), ..ClaudeConfig::default() };
-        assert!(c.is_offline());
-    }
-}
-```
-
-- [ ] **Step 4: Run tests**
-
-```bash
-cargo test -p pdf-core config 2>&1 | tail -20
-```
-
-Expected: all 4 new tests pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add pdf-core/src/config.rs
-git commit -m "feat(config): add mode field and is_offline() helper"
-```
+No action needed.
 
 ---
 
@@ -129,7 +64,7 @@ git commit -m "feat(config): add mode field and is_offline() helper"
 
 - [ ] **Step 1: Add the offline short-circuit before R6**
 
-In `route()`, find the comment `// R6: Ambiguous hybrid` and insert before it:
+In `route()`, find the comment `// R6: Ambiguous hybrid` (or the block where `classify::classify_backends` is called) and insert before it:
 
 ```rust
     // Offline mode: skip LLM classify entirely, route deterministically.
@@ -143,22 +78,20 @@ In `route()`, find the comment `// R6: Ambiguous hybrid` and insert before it:
 
 - [ ] **Step 2: Add test for offline R6 bypass**
 
-In the `#[cfg(test)] mod tests` block in `router.rs`, add a sync helper test. The existing `route_sync` function already simulates R6 as a fallback — add a test showing the intent:
+In the `#[cfg(test)] mod tests` block in `router.rs`:
 
 ```rust
     #[test]
     fn offline_config_never_reaches_r6() {
-        // With an offline config, date+doc_type should short-circuit to Metadata
-        // before the R6 LLM call. route_sync doesn't have the config argument,
-        // so we verify the logic path manually: is_offline() returns true means
-        // the early return fires before primary_signal_count is evaluated.
+        // With an offline config, is_offline() returns true, which means the early
+        // return fires before any LLM call. Verify the config is read correctly.
         let cfg = crate::config::ClaudeConfig {
             mode: Some("offline".to_string()),
             ..crate::config::ClaudeConfig::default()
         };
         assert!(cfg.is_offline(), "config must report offline");
-        // The actual route() fn would return Metadata without any LLM call.
-        // Integration verified by: no API call log + correct result in search.
+        // The actual route() fn returns Metadata without any LLM call.
+        // Integration verified in Task 7 Step 4.
     }
 ```
 
@@ -186,7 +119,7 @@ git commit -m "feat(router): skip R6 LLM call when config is offline"
 
 - [ ] **Step 1: Add offline guard at top of `run_online`**
 
-Find `pub async fn run_online(args: ExtractOnlineArgs) -> anyhow::Result<()> {` and add immediately after the opening brace:
+Find `pub async fn run_online(args: ExtractOnlineArgs) -> anyhow::Result<()> {`. The function already has a `let config = ClaudeConfig::load()?;` call somewhere in its body. Move that call to be the very first statement, then add the guard immediately after:
 
 ```rust
 pub async fn run_online(args: ExtractOnlineArgs) -> anyhow::Result<()> {
@@ -197,10 +130,8 @@ pub async fn run_online(args: ExtractOnlineArgs) -> anyhow::Result<()> {
              To enable online extraction, switch to Online mode in Settings → Plan."
         );
     }
-    // rest of function unchanged...
+    // rest of function unchanged — remove any duplicate ClaudeConfig::load() calls
 ```
-
-Note: `run_online` already calls `ClaudeConfig::load()` further down. Move that first call to the top and reuse. Find the existing `let config = ClaudeConfig::load()?;` inside `run_online` and remove the duplicate — keep only the one added at the top.
 
 - [ ] **Step 2: Verify compile**
 
@@ -210,9 +141,9 @@ cargo build -p pdf-lab 2>&1 | tail -10
 
 Expected: `Finished` with no errors.
 
-- [ ] **Step 3: Smoke test**
+- [ ] **Step 3: Smoke test the guard**
 
-With current config having `"mode": "offline"`:
+With current config having `"mode": "offline"` (or no mode field):
 
 ```bash
 ./target/debug/pdf-lab extract online 2>&1 | head -5
@@ -236,7 +167,7 @@ git commit -m "feat(cli): bail on extract online when config is offline"
 
 - [ ] **Step 1: Add `mode` to `SettingsResponse`**
 
-Find the `SettingsResponse` struct and add the field:
+Find the `SettingsResponse` struct (currently at ~line 71) and add the field:
 
 ```rust
 #[derive(Serialize)]
@@ -252,7 +183,7 @@ struct SettingsResponse {
 
 - [ ] **Step 2: Return `mode` in `handle_get_settings`**
 
-Update the `Json(SettingsResponse { ... })` construction:
+Update the `Json(SettingsResponse { ... })` construction in `handle_get_settings`:
 
 ```rust
 Json(SettingsResponse {
@@ -265,6 +196,8 @@ Json(SettingsResponse {
 ```
 
 - [ ] **Step 3: Add `mode` and `api_key` to `SaveSettingsBody`**
+
+Find `SaveSettingsBody` (currently at ~line 63) and add two fields:
 
 ```rust
 #[derive(Deserialize)]
@@ -279,7 +212,7 @@ struct SaveSettingsBody {
 
 - [ ] **Step 4: Handle `mode` and `api_key` in `handle_save_settings`**
 
-In the handler body, add after the existing `schema_path` block and before `let _ = config.save();`:
+In the handler body, after the existing `schema_path` block and before `let _ = config.save();`, add:
 
 ```rust
     if let Some(m) = body.mode {
@@ -315,37 +248,55 @@ git commit -m "feat(serve): expose mode in settings GET/POST, accept api_key on 
 - Modify: `frontend/src/types.ts`
 - Modify: `frontend/src/api.ts`
 
-- [ ] **Step 1: Add `mode` to `AppSettings` in `types.ts`**
+- [ ] **Step 1: Update `AppSettings` in `types.ts`**
 
-Find `AppSettings` and update:
+Find the `AppSettings` interface. Currently it is:
 
 ```typescript
 export interface AppSettings {
   outputsDir: string
-  apiKeySet: boolean
+  apiKey: string
+  schemaPath: string | null
+}
+```
+
+Replace with:
+
+```typescript
+export interface AppSettings {
+  outputsDir: string
+  apiKeySet: boolean         // boolean — key is never echoed back by the server
   schemaPath: string | null
   mode: 'offline' | 'online'
 }
 ```
 
-Note: the existing field is `apiKey: string` — change it to `apiKeySet: boolean` to match what the server actually sends (the key is never echoed back).
-
 - [ ] **Step 2: Extend `saveSettings` in `api.ts`**
 
-Find the `saveSettings` line and update the signature:
+Find the `saveSettings` line. Currently:
+
+```typescript
+saveSettings: (s: Partial<AppSettings>) => post<void>('/settings', s),
+```
+
+Replace with:
 
 ```typescript
 saveSettings: (s: Partial<{
   outputsDir: string
   schemaPath: string | null
   mode: 'offline' | 'online'
-  apiKey: string
+  apiKey: string             // write-only — not in AppSettings
 }>) => post<void>('/settings', s),
 ```
 
-- [ ] **Step 3: Fix any TypeScript errors from the apiKey → apiKeySet rename**
+- [ ] **Step 3: Fix `apiKey` → `apiKeySet` references in `ScreensSystem.tsx`**
 
-Search `ScreensSystem.tsx` for references to `settings.apiKey` and update to `settings.apiKeySet`. It is currently used only as a boolean indicator (truthy check), so `apiKeySet` is a drop-in.
+```bash
+grep -n "settings\.apiKey\b" frontend/src/ScreensSystem.tsx
+```
+
+For each hit, change `settings.apiKey` to `settings.apiKeySet`. These are used as boolean truthy checks (e.g. show/hide a key warning), so `apiKeySet` (boolean) is a drop-in replacement.
 
 - [ ] **Step 4: Verify TypeScript compiles**
 
@@ -353,13 +304,13 @@ Search `ScreensSystem.tsx` for references to `settings.apiKey` and update to `se
 cd frontend && npm run build 2>&1 | tail -20
 ```
 
-Expected: no TypeScript errors. (Vite build errors are fine to ignore if they're unrelated to the changed files.)
+Expected: no TypeScript errors in `types.ts`, `api.ts`, or `ScreensSystem.tsx`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/src/types.ts frontend/src/api.ts
-git commit -m "feat(frontend): add mode to AppSettings, extend saveSettings API"
+git add frontend/src/types.ts frontend/src/api.ts frontend/src/ScreensSystem.tsx
+git commit -m "feat(frontend): add mode to AppSettings, rename apiKey to apiKeySet, extend saveSettings"
 ```
 
 ---
@@ -368,8 +319,6 @@ git commit -m "feat(frontend): add mode to AppSettings, extend saveSettings API"
 
 **Files:**
 - Modify: `frontend/src/ScreensSystem.tsx`
-
-This task adds the full `ScreenPlan` component and wires it into `ScreenSettings`.
 
 - [ ] **Step 1: Add Plan to SECTIONS array**
 
@@ -387,7 +336,7 @@ const SECTIONS = [
 ] as const
 ```
 
-- [ ] **Step 2: Add ScreenPlanProps interface and ScreenPlan component**
+- [ ] **Step 2: Add ScreenPlan component**
 
 Add before the `ScreenSettings` function:
 
@@ -535,7 +484,7 @@ function ScreenPlan({ mode, onModeChange }: ScreenPlanProps) {
 
 - [ ] **Step 3: Add Plan props to `ScreenSettingsProps` and `ScreenSettings`**
 
-Update the interface:
+Find `interface ScreenSettingsProps` and add:
 
 ```typescript
 interface ScreenSettingsProps {
@@ -548,34 +497,32 @@ interface ScreenSettingsProps {
 }
 ```
 
-Update `ScreenSettings` signature to accept the new props and pass them through:
+Update the `ScreenSettings` function signature:
 
 ```typescript
 export function ScreenSettings({ outputsDir, onFolderChange, schemaPath, onSchemaPathChange, mode, onModeChange }: ScreenSettingsProps) {
 ```
 
-In the `set-main` div, add the Plan case alongside the existing section renders:
+In the `set-main` div, add the Plan case:
 
 ```typescript
 {active === 'Plan'      && <ScreenPlan mode={mode} onModeChange={onModeChange} />}
+{active === 'General'   && <SettingsGeneral ... />}
 {active === 'Indexing'  && <SettingsIndexing ... />}
 // ... rest unchanged
 ```
 
 - [ ] **Step 4: Find the parent component and wire mode state**
 
-First locate where `ScreenSettings` is rendered:
-
 ```bash
 grep -rn "ScreenSettings" frontend/src/
 ```
 
-Open the file that renders `<ScreenSettings`. Add `mode` state at the top of that component:
+Open the file that renders `<ScreenSettings`. Add `mode` state and load it on mount:
 
 ```typescript
 const [mode, setMode] = useState<'offline' | 'online'>('offline')
 
-// Load initial mode from settings on mount
 useEffect(() => {
   api.settings().then(s => setMode(s.mode ?? 'offline')).catch(() => {})
 }, [])
@@ -632,7 +579,6 @@ Expected: all tests pass.
 - [ ] **Step 3: Verify offline mode blocks online extract**
 
 ```bash
-# Ensure mode is offline in config
 ./target/debug/pdf-lab extract online 2>&1
 ```
 
@@ -646,27 +592,33 @@ Expected: `Error: online extraction is disabled — pdf-lab is set to Offline mo
 
 Expected: results printed, no `warning: LLM triage failed` line in stderr.
 
-- [ ] **Step 5: Verify switching to online via API**
+- [ ] **Step 5: Verify settings round-trip via API**
 
 ```bash
-# Start serve in background, then test settings round-trip
+# Start serve in background
 ./target/debug/pdf-lab serve &
 sleep 1
+
+# Check initial mode (offline)
 curl -s http://127.0.0.1:7410/settings | python3 -m json.tool | grep mode
 # Expected: "mode": "offline"
 
+# Activate online mode
 curl -s -X POST http://127.0.0.1:7410/settings \
   -H 'Content-Type: application/json' \
-  -d '{"mode":"online","apiKey":"test-key"}' -w "%{http_code}"
+  -d '{"mode":"online","apiKey":"test-key"}' -w "\n%{http_code}\n"
 # Expected: 204
 
+# Confirm mode changed
 curl -s http://127.0.0.1:7410/settings | python3 -m json.tool | grep mode
 # Expected: "mode": "online"
 
-# Reset back to offline
+# Reset to offline
 curl -s -X POST http://127.0.0.1:7410/settings \
   -H 'Content-Type: application/json' \
-  -d '{"mode":"offline"}' -w "%{http_code}"
+  -d '{"mode":"offline"}' -w "\n%{http_code}\n"
+# Expected: 204
+
 kill %1
 ```
 
@@ -674,7 +626,6 @@ kill %1
 
 ```bash
 git status
-# Stage anything uncommitted
 git add -A
-git commit -m "feat: offline/online mode — config, router, CLI guard, UI Plan section" || true
+git commit -m "feat: offline/online mode — router guard, CLI guard, settings API, UI Plan section" || true
 ```

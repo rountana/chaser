@@ -96,10 +96,7 @@ impl PdfLabServer {
 
 async fn do_extract(input: ExtractDocumentInput) -> anyhow::Result<String> {
     let config = ClaudeConfig::load()?;
-    let schema = match &config.schema_path {
-        Some(p) => SchemaRegistry::load(std::path::Path::new(p))?,
-        None => SchemaRegistry::load_default()?,
-    };
+    let schema = SchemaRegistry::load_auto(config.schema_path.as_ref().map(std::path::Path::new))?;
 
     let path = std::path::Path::new(&input.file_path);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -121,18 +118,18 @@ async fn do_extract(input: ExtractDocumentInput) -> anyhow::Result<String> {
     // Pass 2: full extraction
     let result = claude::call_claude(&pages, &config, &schema, &doc_type).await?;
 
-    let outputs_dir = std::path::Path::new("outputs");
-    let person_field_names = schema.searchable_person_field_names();
-    let date_field_names = schema.searchable_date_field_names();
-    let known_persons = MetadataIndex::build(outputs_dir, &person_field_names, &date_field_names)
-        .map(|idx| idx.known_persons)
-        .unwrap_or_default();
+    let index_base = config.resolve_index_dir(None);
+    let known_persons = MetadataIndex::known_persons_for(&index_base, &schema);
 
     let md = frontmatter::generate_md(&result, path, &pages, &schema, &known_persons, None, 0);
 
     if !stem.is_empty() {
-        let _ = std::fs::create_dir_all(outputs_dir);
-        let out_path = outputs_dir.join(format!("{stem}.md"));
+        // MCP extraction is online (LLM) extraction, so it lands in the online tier,
+        // split into text/ or images/ by the caller-declared file type.
+        let sub = if input.file_type.eq_ignore_ascii_case("image") { "images" } else { "text" };
+        let category_dir = index_base.join("online").join(sub);
+        let _ = std::fs::create_dir_all(&category_dir);
+        let out_path = category_dir.join(format!("{stem}.md"));
         let _ = std::fs::write(&out_path, &md);
     }
 
@@ -174,6 +171,7 @@ async fn do_classify_query(input: ClassifyQueryInput) -> anyhow::Result<String> 
             pdf_core::search::Backend::Metadata => "metadata",
             pdf_core::search::Backend::Structural => "structural",
             pdf_core::search::Backend::Semantic => "semantic",
+            pdf_core::search::Backend::Keyword => "keyword",
         })
         .collect();
 

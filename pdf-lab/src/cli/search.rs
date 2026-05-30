@@ -1,17 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
-use serde_json::json;
 
 use pdf_core::{
     config::ClaudeConfig,
     schema::SchemaRegistry,
-    search::{
-        Backend, SearchMode, SearchResult,
-        index::MetadataIndex,
-        intent::IntentIndex,
-        merge, merged_dirs, metadata, router, semantic, structural,
-    },
+    search::{Backend, SearchMode, SearchResult, execute, intent::IntentIndex},
 };
 
 #[derive(Args)]
@@ -23,7 +17,7 @@ pub struct SearchArgs {
     pub top: usize,
 
     #[arg(long, help = "Override output directory to search")]
-    pub outputs_dir: Option<PathBuf>,
+    pub index_dir: Option<PathBuf>,
 
     #[arg(long, help = "Emit JSON array to stdout")]
     pub json: bool,
@@ -34,90 +28,15 @@ pub struct SearchArgs {
 
 pub async fn run(args: SearchArgs) -> anyhow::Result<()> {
     let config = ClaudeConfig::load()?;
-    let outputs_base = config.resolve_outputs_dir(args.outputs_dir);
-
+    let index_base = config.resolve_index_dir(args.index_dir);
     let mode: SearchMode = args.mode.parse()?;
-    let dirs = merged_dirs(&outputs_base, &mode);
-
-    let schema = match &config.schema_path {
-        Some(p) => SchemaRegistry::load(std::path::Path::new(p))?,
-        None => SchemaRegistry::load_default()?,
-    };
+    let schema = SchemaRegistry::load_auto(config.schema_path.as_ref().map(Path::new))?;
     let intent_index = IntentIndex::new(&schema.doc_type_values)?;
-    let person_field_names = schema.searchable_person_field_names();
-    let date_field_names = schema.searchable_date_field_names();
-    let index = MetadataIndex::build_merged_with_fields(
-        &dirs.offline, &dirs.online, &person_field_names, &date_field_names,
-    )?;
-    let search_dir = if dirs.online.exists() { dirs.online.clone() } else { dirs.offline.clone() };
 
-    let signals = intent_index.parse(&args.query, &index.known_persons);
-
-    let candidate_limit = args.top * 2;
-    let mut all_results: Vec<SearchResult> = Vec::new();
-
-    match mode {
-        SearchMode::Images => {
-            let mut r = metadata::search(&signals, &index);
-            r.truncate(candidate_limit);
-            for result in &mut r {
-                result.snippet = super::images_snippet(&result.meta);
-            }
-            all_results.append(&mut r);
-        }
-        SearchMode::Text => {
-            let backends = router::route(
-                &signals,
-                &args.query,
-                &config,
-                &index.known_persons,
-                &schema.doc_type_values,
-            )
-            .await;
-
-            for backend in &backends {
-                let mut results = match backend {
-                    Backend::Metadata => {
-                        let mut r = metadata::search(&signals, &index);
-                        r.truncate(candidate_limit);
-                        r
-                    }
-                    Backend::Structural => structural::search(&signals, &search_dir),
-                    Backend::Semantic => {
-                        let mut r = semantic::search(&args.query);
-                        r.truncate(candidate_limit);
-                        r
-                    }
-                };
-                all_results.append(&mut results);
-            }
-        }
-    }
-
-    let combined = merge::merge(all_results, args.top);
+    let combined = execute(&args.query, &index_base, &mode, args.top, &intent_index, &config, &schema).await;
 
     if args.json {
-        let json_results: Vec<serde_json::Value> = combined
-            .iter()
-            .map(|r| {
-                json!({
-                    "filePath": r.file_path.display().to_string(),
-                    "fileName": r.file_name,
-                    "snippet": r.snippet,
-                    "pageNum": r.page_num,
-                    "backend": r.backend.to_string(),
-                    "score": r.score,
-                    "meta": {
-                        "person": r.meta.person,
-                        "docType": r.meta.doc_type,
-                        "date": r.meta.date,
-                        "institution": r.meta.institution,
-                        "pages": r.meta.pages,
-                        "words": r.meta.words,
-                    }
-                })
-            })
-            .collect();
+        let json_results: Vec<serde_json::Value> = combined.iter().map(|r| r.to_json()).collect();
         println!("{}", serde_json::to_string_pretty(&json_results)?);
     } else {
         if combined.is_empty() {
@@ -163,6 +82,10 @@ fn print_result(result: &SearchResult) {
             if let Some(score) = result.score {
                 println!("  Similarity: {score:.3}");
             }
+        }
+        Backend::Keyword => {
+            let doc_type = result.meta.doc_type.as_deref().unwrap_or("—");
+            println!("  Type: {doc_type}");
         }
     }
 

@@ -91,7 +91,7 @@ export interface IndexStatus {
 }
 
 export interface AppSettings {
-  outputsDir: string
+  indexDir: string
   apiKeySet: boolean
   schemaPath: string | null
   mode: 'offline' | 'online'

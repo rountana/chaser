@@ -89,11 +89,11 @@ function FolderPicker({ label, value, onChange, hint }: FolderPickerProps) {
 // ── Screen 5: First-run indexing ─────────────────────────────────────────────
 
 interface ScreenIndexingProps {
-  outputsDir: string
+  indexDir: string
   onFolderChange: (dir: string) => void
 }
 
-export function ScreenIndexing({ outputsDir, onFolderChange }: ScreenIndexingProps) {
+export function ScreenIndexing({ indexDir, onFolderChange }: ScreenIndexingProps) {
   const [folders, setFolders] = useState([
     { name: '~/Documents', size: '412 MB', count: '1,840 files', on: true },
     { name: '~/Pictures', size: '8.4 GB', count: '12,304 files', on: true },
@@ -121,7 +121,7 @@ export function ScreenIndexing({ outputsDir, onFolderChange }: ScreenIndexingPro
 
       <FolderPicker
         label="Outputs directory (parent of offline/ and online/)"
-        value={outputsDir}
+        value={indexDir}
         onChange={onFolderChange}
         hint="Set this to the outputs/ parent directory. offline/ and online/ subdirectories are discovered automatically."
       />
@@ -338,7 +338,7 @@ function ScreenPlan({ mode, onModeChange }: ScreenPlanProps) {
 }
 
 interface ScreenSettingsProps {
-  outputsDir: string
+  indexDir: string
   onFolderChange: (dir: string) => void
   schemaPath: string
   onSchemaPathChange: (p: string) => void
@@ -346,7 +346,7 @@ interface ScreenSettingsProps {
   onModeChange: (mode: 'offline' | 'online') => void
 }
 
-export function ScreenSettings({ outputsDir, onFolderChange, schemaPath, onSchemaPathChange, mode, onModeChange }: ScreenSettingsProps) {
+export function ScreenSettings({ indexDir, onFolderChange, schemaPath, onSchemaPathChange, mode, onModeChange }: ScreenSettingsProps) {
   const [active, setActive] = useState<string>('Indexing')
 
   return (
@@ -366,7 +366,7 @@ export function ScreenSettings({ outputsDir, onFolderChange, schemaPath, onSchem
 
       <div className="set-main">
         {active === 'Plan'      && <ScreenPlan mode={mode} onModeChange={onModeChange} />}
-        {active === 'Indexing'  && <SettingsIndexing outputsDir={outputsDir} onFolderChange={onFolderChange} schemaPath={schemaPath} onSchemaPathChange={onSchemaPathChange} />}
+        {active === 'Indexing'  && <SettingsIndexing indexDir={indexDir} onFolderChange={onFolderChange} schemaPath={schemaPath} onSchemaPathChange={onSchemaPathChange} />}
         {active === 'Search'    && <SettingsSearch />}
         {active === 'Privacy'   && <SettingsPrivacy />}
         {active === 'Shortcuts' && <SettingsShortcuts />}
@@ -377,7 +377,7 @@ export function ScreenSettings({ outputsDir, onFolderChange, schemaPath, onSchem
   )
 }
 
-function SettingsIndexing({ outputsDir, onFolderChange, schemaPath, onSchemaPathChange }: { outputsDir: string; onFolderChange: (d: string) => void; schemaPath: string; onSchemaPathChange: (p: string) => void }) {
+function SettingsIndexing({ indexDir, onFolderChange, schemaPath, onSchemaPathChange }: { indexDir: string; onFolderChange: (d: string) => void; schemaPath: string; onSchemaPathChange: (p: string) => void }) {
   const [auto, setAuto] = useState(true)
   const [archives, setArchives] = useState(false)
 
@@ -390,7 +390,7 @@ function SettingsIndexing({ outputsDir, onFolderChange, schemaPath, onSchemaPath
         <h4>Outputs folder</h4>
         <FolderPicker
           label="Outputs directory"
-          value={outputsDir}
+          value={indexDir}
           onChange={onFolderChange}
           hint="Set this to the parent outputs/ directory. Chaser automatically reads from offline/ and online/ subdirectories, preferring online/ when both exist for the same file."
         />

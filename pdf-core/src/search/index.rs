@@ -14,6 +14,7 @@ pub struct FileMeta {
     pub file_path: PathBuf,
     pub body_preview: String,
     pub source_file: Option<PathBuf>,
+    pub extraction_mode: String,
 }
 
 #[derive(Debug, Clone)]
@@ -23,7 +24,7 @@ pub struct MetadataIndex {
 }
 
 impl MetadataIndex {
-    /// Build the index from all `.md` files in `outputs_dir`.
+    /// Build the index from all `.md` files in `index_dir`.
     ///
     /// `person_field_names`: YAML keys for searchable person-name fields (from
     /// `SchemaRegistry::searchable_person_field_names()`). Pass `&["person"]` when
@@ -32,15 +33,15 @@ impl MetadataIndex {
     /// `date_field_names`: YAML keys for searchable date fields (from
     /// `SchemaRegistry::searchable_date_field_names()`). Pass `&["date"]` when
     /// running without a schema.
-    pub fn build(outputs_dir: &Path, person_field_names: &[&str], date_field_names: &[&str]) -> anyhow::Result<Self> {
+    pub fn build(index_dir: &Path, person_field_names: &[&str], date_field_names: &[&str]) -> anyhow::Result<Self> {
         let mut entries = HashMap::new();
         let mut persons_set = std::collections::HashSet::new();
 
-        if !outputs_dir.exists() {
+        if !index_dir.exists() {
             return Ok(Self { entries, known_persons: vec![] });
         }
 
-        let walker = ignore::WalkBuilder::new(outputs_dir)
+        let walker = ignore::WalkBuilder::new(index_dir)
             .hidden(false)
             .git_ignore(false)
             .build();
@@ -106,13 +107,15 @@ impl MetadataIndex {
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from);
 
+            let extraction_mode = get("extraction_mode");
+
             let stem = path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
 
-            entries.insert(stem, FileMeta { person, doc_type, date, institution, title, pages, file_path: path, body_preview, source_file });
+            entries.insert(stem, FileMeta { person, doc_type, date, institution, title, pages, file_path: path, body_preview, source_file, extraction_mode });
         }
 
         let mut known_persons: Vec<String> = persons_set.into_iter().collect();
@@ -145,6 +148,15 @@ impl MetadataIndex {
         merged.known_persons.sort();
 
         Ok(merged)
+    }
+
+    /// Convenience: build index from `dir` using schema field names and return only the known persons.
+    pub fn known_persons_for(dir: &Path, schema: &crate::schema::SchemaRegistry) -> Vec<String> {
+        let person_field_names = schema.searchable_person_field_names();
+        let date_field_names = schema.searchable_date_field_names();
+        Self::build(dir, &person_field_names, &date_field_names)
+            .map(|idx| idx.known_persons)
+            .unwrap_or_default()
     }
 
     /// Build index from merged offline + online trees, using schema-specific field names.

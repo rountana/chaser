@@ -14,7 +14,7 @@ const SCREENS: { id: ScreenId; n: string; label: string; icon: string }[] = [
   { id: 'settings', n: '05', label: 'Settings',  icon: 'settings' },
 ]
 
-const LS_OUTPUTS_DIR = 'chaser.outputsDir'
+const LS_INDEX_DIR = 'chaser.indexDir'
 const LS_SCHEMA_PATH = 'chaser.schemaPath'
 const LS_SEARCH_MODE = 'chaser.searchMode'
 type SearchMode = 'text' | 'images'
@@ -26,12 +26,12 @@ function saveSearchMode(m: SearchMode) {
   localStorage.setItem(LS_SEARCH_MODE, m)
 }
 
-function loadOutputsDir(): string {
-  return localStorage.getItem(LS_OUTPUTS_DIR) ?? ''
+function loadIndexDir(): string {
+  return localStorage.getItem(LS_INDEX_DIR) ?? ''
 }
 
-function saveOutputsDir(dir: string) {
-  localStorage.setItem(LS_OUTPUTS_DIR, dir)
+function saveIndexDir(dir: string) {
+  localStorage.setItem(LS_INDEX_DIR, dir)
 }
 
 function loadSchemaPath(): string {
@@ -69,7 +69,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [layout, setLayout] = useState('list')
   const [showScores, setShowScores] = useState(true)
-  const [outputsDir, setOutputsDirState] = useState<string>(loadOutputsDir)
+  const [indexDir, setIndexDirState] = useState<string>(loadIndexDir)
   const [schemaPath, setSchemaPathState] = useState<string>(loadSchemaPath)
   const [fileCount, setFileCount] = useState<number | null>(null)
   const [searchMode, setSearchModeState] = useState<SearchMode>(loadSearchMode)
@@ -79,10 +79,10 @@ export default function App() {
     saveSearchMode(m)
   }
 
-  function setOutputsDir(dir: string) {
-    setOutputsDirState(dir)
-    saveOutputsDir(dir)
-    api.saveSettings({ outputsDir: dir }).catch(() => {})
+  function setIndexDir(dir: string) {
+    setIndexDirState(dir)
+    saveIndexDir(dir)
+    api.saveSettings({ indexDir: dir }).catch(() => {})
   }
 
   function setSchemaPath(p: string) {
@@ -95,7 +95,7 @@ export default function App() {
   useEffect(() => {
     api.settings()
       .then(s => {
-        if (s.outputsDir && !outputsDir) setOutputsDir(s.outputsDir)
+        if (s.indexDir && !indexDir) setIndexDir(s.indexDir)
         if (s.schemaPath && !schemaPath) setSchemaPathState(s.schemaPath)
         setMode(s.mode ?? 'offline')
       })
@@ -104,11 +104,11 @@ export default function App() {
 
   // Poll file count for the status badge
   useEffect(() => {
-    if (!outputsDir) return
-    api.indexStatus(outputsDir)
+    if (!indexDir) return
+    api.indexStatus(indexDir)
       .then(s => setFileCount(s.filesIndexed))
       .catch(() => {})
-  }, [outputsDir])
+  }, [indexDir])
 
   function handleSearch(q: string) {
     setQuery(q)
@@ -132,7 +132,7 @@ export default function App() {
 
   let screen: React.ReactNode
   if (active === 'empty') {
-    screen = <ScreenEmpty onSearch={handleSearch} />
+    screen = <ScreenEmpty onSearch={handleSearch} searchMode={searchMode} setSearchMode={setSearchMode} />
   } else if (active === 'results') {
     screen = (
       <ScreenResults
@@ -141,9 +141,8 @@ export default function App() {
         layout={layout} setLayout={setLayout}
         showScores={showScores} setShowScores={setShowScores}
         onSearch={handleSearch}
-        outputsDir={outputsDir}
+        indexDir={indexDir}
         searchMode={searchMode}
-        setSearchMode={setSearchMode}
       />
     )
   } else if (active === 'preview') {
@@ -154,23 +153,22 @@ export default function App() {
         layout={layout} setLayout={setLayout}
         showScores={showScores} setShowScores={setShowScores}
         withPreview onSearch={handleSearch}
-        outputsDir={outputsDir}
+        indexDir={indexDir}
         searchMode={searchMode}
-        setSearchMode={setSearchMode}
       />
     )
   } else if (active === 'indexing') {
     screen = (
       <ScreenIndexing
-        outputsDir={outputsDir}
-        onFolderChange={setOutputsDir}
+        indexDir={indexDir}
+        onFolderChange={setIndexDir}
       />
     )
   } else {
     screen = (
       <ScreenSettings
-        outputsDir={outputsDir}
-        onFolderChange={setOutputsDir}
+        indexDir={indexDir}
+        onFolderChange={setIndexDir}
         schemaPath={schemaPath}
         onSchemaPathChange={setSchemaPath}
         mode={mode}
@@ -181,7 +179,7 @@ export default function App() {
 
   const statusLabel = fileCount !== null
     ? `${fileCount.toLocaleString()} files indexed`
-    : outputsDir ? 'loading…' : 'no folder set'
+    : indexDir ? 'loading…' : 'no folder set'
 
   return (
     <div className="page">

@@ -4,11 +4,15 @@ use super::{Backend, ResultMeta, SearchResult, index::MetadataIndex, intent::Int
 ///
 /// AND-chain across non-empty signals. Multiple persons/doc_types use OR within their group.
 pub fn search(signals: &IntentSignals, index: &MetadataIndex) -> Vec<SearchResult> {
+    eprintln!("[search:metadata] persons={:?} doc_types={:?} dates={:?} index_size={}",
+        signals.persons, signals.doc_types, signals.dates, index.entries.len());
+
     if signals.persons.is_empty() && signals.doc_types.is_empty() && signals.dates.is_empty() {
+        eprintln!("[search:metadata] no signals → early return (0 results)");
         return vec![];
     }
 
-    index
+    let results = index
         .entries
         .values()
         .filter(|meta| {
@@ -68,8 +72,11 @@ pub fn search(signals: &IntentSignals, index: &MetadataIndex) -> Vec<SearchResul
                     words: None,
                 },
                 source_path: meta.source_file.clone(),
+                extraction_mode: meta.extraction_mode.clone(),
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    eprintln!("[search:metadata] matched {} entries", results.len());
+    results
 }
 

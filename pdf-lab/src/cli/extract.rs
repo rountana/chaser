@@ -68,7 +68,7 @@ pub struct ExtractOfflineArgs {
     #[arg(long, help = "Override source directory")]
     pub source_dir: Option<PathBuf>,
     #[arg(long, help = "Override output directory (offline/ subdirectory is always appended)")]
-    pub outputs_dir: Option<PathBuf>,
+    pub index_dir: Option<PathBuf>,
     #[arg(long, help = "Emit JSON lines to stdout instead of human-readable stderr")]
     pub json: bool,
 }
@@ -80,7 +80,7 @@ pub struct ExtractOnlineArgs {
     #[arg(long, help = "Enrich all files in outputs/offline/ that lack a corresponding outputs/online/ file")]
     pub all: bool,
     #[arg(long, help = "Override output directory")]
-    pub outputs_dir: Option<PathBuf>,
+    pub index_dir: Option<PathBuf>,
     #[arg(long, help = "Emit JSON lines to stdout")]
     pub json: bool,
     #[arg(long, help = "Auto-suggest schema fields for unknown document types")]
@@ -352,36 +352,18 @@ async fn run_offline(args: ExtractOfflineArgs) -> anyhow::Result<()> {
     use pdf_core::extraction::offline;
 
     let config = ClaudeConfig::load()?;
-    let outputs_base = config.resolve_outputs_dir(args.outputs_dir);
-    let offline_base = outputs_base.join("offline");
+    let index_base = config.resolve_index_dir(args.index_dir);
+    let offline_base = index_base.join("offline");
     let source_dir = config.resolve_source_dir(args.source_dir.clone());
 
-    let schema = match &config.schema_path {
-        Some(p) => SchemaRegistry::load(std::path::Path::new(p))?,
-        None => SchemaRegistry::load_default()?,
-    };
+    let schema = SchemaRegistry::load_auto(config.schema_path.as_ref().map(std::path::Path::new))?;
 
     let paths = resolve_paths(args.paths, source_dir)?;
     if paths.is_empty() {
         anyhow::bail!("No supported files found to extract.");
     }
 
-    let person_field_names: Vec<String> = schema
-        .searchable_person_field_names()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    let date_field_names: Vec<String> = schema
-        .searchable_date_field_names()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    let person_refs: Vec<&str> = person_field_names.iter().map(String::as_str).collect();
-    let date_refs: Vec<&str> = date_field_names.iter().map(String::as_str).collect();
-    let existing_index =
-        MetadataIndex::build(&offline_base.join("text"), &person_refs, &date_refs)
-            .unwrap_or_else(|_| MetadataIndex { entries: Default::default(), known_persons: vec![] });
-    let known_persons = existing_index.known_persons;
+    let known_persons = MetadataIndex::known_persons_for(&offline_base.join("text"), &schema);
 
     let name_width = name_column_width(&paths);
     let bar = make_progress_bar(args.json, paths.len() as u64);
@@ -477,14 +459,11 @@ async fn run_online(args: ExtractOnlineArgs) -> anyhow::Result<()> {
              To enable online extraction, switch to Online mode in Settings → Plan."
         );
     }
-    let outputs_base = config.resolve_outputs_dir(args.outputs_dir.clone());
-    let offline_base = outputs_base.join("offline");
-    let online_base = outputs_base.join("online");
+    let index_base = config.resolve_index_dir(args.index_dir.clone());
+    let offline_base = index_base.join("offline");
+    let online_base = index_base.join("online");
 
-    let mut schema = match &config.schema_path {
-        Some(p) => SchemaRegistry::load(std::path::Path::new(p))?,
-        None => SchemaRegistry::load_default()?,
-    };
+    let mut schema = SchemaRegistry::load_auto(config.schema_path.as_ref().map(std::path::Path::new))?;
 
     let md_files: Vec<PathBuf> = if args.all {
         collect_offline_md_files(&offline_base, &online_base)
@@ -505,21 +484,7 @@ async fn run_online(args: ExtractOnlineArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let person_field_names: Vec<String> = schema
-        .searchable_person_field_names()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    let date_field_names: Vec<String> = schema
-        .searchable_date_field_names()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    let person_refs: Vec<&str> = person_field_names.iter().map(String::as_str).collect();
-    let date_refs: Vec<&str> = date_field_names.iter().map(String::as_str).collect();
-    let index = MetadataIndex::build(&offline_base.join("text"), &person_refs, &date_refs)
-        .unwrap_or_else(|_| MetadataIndex { entries: Default::default(), known_persons: vec![] });
-    let known_persons = index.known_persons;
+    let known_persons = MetadataIndex::known_persons_for(&offline_base.join("text"), &schema);
 
     let name_width = name_column_width(&md_files);
     let bar = make_progress_bar(args.json, md_files.len() as u64);

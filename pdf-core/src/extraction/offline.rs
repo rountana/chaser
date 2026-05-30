@@ -8,37 +8,28 @@ use crate::frontmatter::filename;
 
 use super::{ExtractionResult, PageContent, PageText, heuristic, ocr, pdfium};
 
-/// Run the fully offline extraction pipeline on a single PDF or image file.
+/// Phase 1: render a PDF or image into pages, run OCR on image pages, and assemble
+/// the full body text. Returns `(pages, page_texts, full_body, doc_category)`.
 ///
-/// No LLM calls are made. Frontmatter fields are populated from filename regex
-/// first, then supplemented by body-text heuristics.
-pub async fn extract_offline(
-    path: &Path,
-    schema: &SchemaRegistry,
-    known_persons: &[String],
-) -> anyhow::Result<(ExtractionResult, Vec<PageContent>)> {
+/// Exposed publicly so the CLI can salvage extracted text when the full pipeline fails.
+pub async fn render_pages(path: &Path) -> anyhow::Result<(Vec<PageContent>, Vec<PageText>, String, String)> {
     let ext = path.extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let stem = path.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
 
-    // Render the file into pages.
     let pages: Vec<PageContent> = match ext.as_str() {
-        "pdf"              => pdfium::render_pdf(path)
+        "pdf"                   => pdfium::render_pdf(path)
             .with_context(|| format!("rendering PDF: {}", path.display()))?,
-        "jpg" | "jpeg" | "png" => pdfium::load_image(path)
+        "jpg" | "jpeg" | "png"  => pdfium::load_image(path)
             .with_context(|| format!("loading image: {}", path.display()))?,
         other => anyhow::bail!("unsupported file type: .{other}"),
     };
 
     let is_image_source = matches!(ext.as_str(), "jpg" | "jpeg" | "png");
     let has_image_pages = pages.iter().any(|p| p.is_image());
-    let doc_category = if is_image_source || has_image_pages { "image" } else { "text" };
+    let doc_category = if is_image_source || has_image_pages { "image" } else { "text" }.to_string();
 
-    // Extract body text: pdfium text pages as-is; image pages via Tesseract.
     let mut page_texts: Vec<PageText> = Vec::new();
     for page in &pages {
         match page {
@@ -62,12 +53,28 @@ pub async fn extract_offline(
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Infer doc_type: filename heuristic first, body-text second.
+    Ok((pages, page_texts, full_body, doc_category))
+}
+
+/// Run the fully offline extraction pipeline on a single PDF or image file.
+///
+/// No LLM calls are made. Frontmatter fields are populated from filename regex
+/// first, then supplemented by body-text heuristics.
+pub async fn extract_offline(
+    path: &Path,
+    schema: &SchemaRegistry,
+    known_persons: &[String],
+) -> anyhow::Result<(ExtractionResult, Vec<PageContent>)> {
+    let stem = path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+
+    let (pages, page_texts, full_body, doc_category) = render_pages(path).await?;
+
     let doc_type = schema.infer_doc_type_from_stem(stem)
         .or_else(|| heuristic::infer_doc_type_from_text(&full_body))
         .unwrap_or_else(|| schema.doc_type_default.clone());
 
-    // Build fields map. Person and date use filename regex, fall back to body-text.
     let mut fields: HashMap<String, String> = HashMap::new();
 
     let person = filename::extract_person(stem, known_persons, &schema.doc_type_values)
@@ -92,7 +99,7 @@ pub async fn extract_offline(
     let result = ExtractionResult {
         pages: page_texts,
         doc_type,
-        doc_category: doc_category.to_string(),
+        doc_category,
         fields,
         ocr_method,
         extraction_mode: "offline".to_string(),
